@@ -1938,37 +1938,40 @@ mod service_payload_tests {
             };
             assert_eq!(borrowed.as_ptr(), data.as_ptr());
             assert_eq!(borrowed.len(), data.len());
-            let encrypted = encrypted_service_block(
-                b"CMT",
-                &data,
-                &[],
-                b"secret",
-                None,
-                &WriterResources::default(),
-            )
-            .unwrap();
-            let Payload::Encrypted { plain, keys, iv } = &encrypted.payload else {
-                panic!("expected streaming encryption")
-            };
-            let PlainPayload::Borrowed(borrowed) = plain.as_ref() else {
-                panic!("expected borrowed plaintext")
-            };
-            assert_eq!(borrowed.as_ptr(), data.as_ptr());
-            let mut expected = data.clone();
-            expected.resize(size.div_ceil(16) * 16, 0);
-            crate::crypto::rar50::Rar50Cipher::new(keys.key, *iv)
-                .encrypt_in_place(&mut expected)
+            #[cfg(feature = "encryption")]
+            {
+                let encrypted = encrypted_service_block(
+                    b"CMT",
+                    &data,
+                    &[],
+                    b"secret",
+                    None,
+                    &WriterResources::default(),
+                )
                 .unwrap();
-            assert_eq!(encrypted.payload_len, expected.len() as u64);
-            let mut actual = Vec::new();
-            write_payload(
-                encrypted.payload,
-                &mut actual,
-                &WriterResources::default(),
-                None,
-            )
-            .unwrap();
-            assert_eq!(actual, expected, "service size {size}");
+                let Payload::Encrypted { plain, keys, iv } = &encrypted.payload else {
+                    panic!("expected streaming encryption")
+                };
+                let PlainPayload::Borrowed(borrowed) = plain.as_ref() else {
+                    panic!("expected borrowed plaintext")
+                };
+                assert_eq!(borrowed.as_ptr(), data.as_ptr());
+                let mut expected = data.clone();
+                expected.resize(size.div_ceil(16) * 16, 0);
+                crate::crypto::rar50::Rar50Cipher::new(keys.key, *iv)
+                    .encrypt_in_place(&mut expected)
+                    .unwrap();
+                assert_eq!(encrypted.payload_len, expected.len() as u64);
+                let mut actual = Vec::new();
+                write_payload(
+                    encrypted.payload,
+                    &mut actual,
+                    &WriterResources::default(),
+                    None,
+                )
+                .unwrap();
+                assert_eq!(actual, expected, "service size {size}");
+            }
         }
     }
 }
@@ -2438,6 +2441,7 @@ mod emission_ledger_tests {
     }
 
     #[test]
+    #[cfg(feature = "encryption")]
     fn encryption_emission_counts_retained_preparation_and_releases_chunk() {
         let data = vec![7; 65537];
         for limit in [65536, 131072] {
@@ -2576,7 +2580,7 @@ mod emission_ledger_tests {
                 filter_policy: super::super::FilterPolicy::None,
                 candidates: vec![options].into(),
             },
-            recovery_percent: Some(10),
+            recovery_percent: cfg!(feature = "recovery").then_some(10),
             header_encrypted: encrypted,
             header_password: encrypted.then_some(b"secret".as_slice()),
             archive_comment: Some(if encrypted {
@@ -2637,7 +2641,7 @@ mod emission_ledger_tests {
     #[test]
     fn archive_and_volume_emission_keep_the_ledger_reusable() {
         let scratch = crate::scratch::case("archive-emission-ledger");
-        for encrypted in [false, true] {
+        for encrypted in crate::test_features::encryption_cases() {
             let mut entry = ArchiveEntry::new(
                 b"payload".to_vec(),
                 crate::EntrySource::from_bytes(vec![7; 16384]),
@@ -2782,6 +2786,7 @@ mod emission_ledger_tests {
     }
 
     #[test]
+    #[cfg(feature = "encryption")]
     fn encrypted_archive_preparation_refusals_release_capacity() {
         let entries = [ArchiveEntry::new(
             b"payload".to_vec(),
@@ -2842,7 +2847,7 @@ mod emission_ledger_tests {
 
     #[test]
     fn archive_service_preparation_failure_preserves_member_context() {
-        for encrypted in [false, true] {
+        for encrypted in crate::test_features::encryption_cases() {
             let mut service = super::super::ServiceEntry::new(b"CMT", b"note");
             if encrypted {
                 service = service.with_password(b"secret");
@@ -2899,6 +2904,7 @@ mod emission_ledger_tests {
     }
 
     #[test]
+    #[cfg(feature = "encryption")]
     fn encrypted_service_rejects_oversized_name_after_extra_preparation() {
         let name = vec![b'n'; 4096];
         let resources = WriterResources::default().with_max_preparation_bytes(512);
@@ -2986,6 +2992,7 @@ mod emission_ledger_tests {
     }
 
     #[test]
+    #[cfg(feature = "recovery")]
     fn recovery_releases_preparation_for_each_injected_admission_failure() {
         use std::sync::atomic::Ordering;
 
@@ -3021,6 +3028,7 @@ mod emission_ledger_tests {
     }
 
     #[test]
+    #[cfg(feature = "recovery")]
     fn volume_recovery_releases_preparation_for_each_injected_admission_failure() {
         use std::sync::atomic::Ordering;
 
@@ -3056,6 +3064,7 @@ mod emission_ledger_tests {
     }
 
     #[test]
+    #[cfg(feature = "encryption")]
     fn encrypted_outputs_release_late_preparation_refusals() {
         use std::sync::atomic::Ordering;
 
@@ -3104,6 +3113,8 @@ mod emission_ledger_tests {
     }
 
     #[test]
+    #[cfg(feature = "encryption")]
+    #[cfg(feature = "recovery")]
     fn encrypted_recovery_releases_late_preparation_refusals() {
         use std::sync::atomic::Ordering;
 
@@ -3138,6 +3149,7 @@ mod emission_ledger_tests {
     }
 
     #[test]
+    #[cfg(feature = "encryption")]
     fn encrypted_volume_reread_failure_keeps_member_context() {
         use std::sync::{
             atomic::{AtomicUsize, Ordering},
@@ -3179,6 +3191,7 @@ mod emission_ledger_tests {
     }
 
     #[test]
+    #[cfg(feature = "encryption")]
     fn encrypted_compressed_volume_payload_propagates_spool_refusal() {
         let scratch = crate::scratch::case("encrypted-volume-spool-refusal");
         let resources = WriterResources::default().with_temp_dir(&*scratch);
