@@ -1024,7 +1024,8 @@ mod tests {
                     );
                     if overwrite == OverwritePolicy::Never {
                         assert!(staged.is_err());
-                        assert!(!root.join("source").exists());
+                        // The earlier member was verified, so it is kept.
+                        assert_eq!(fs::read(root.join("source")).unwrap(), b"payload");
                         continue;
                     }
                     staged.unwrap();
