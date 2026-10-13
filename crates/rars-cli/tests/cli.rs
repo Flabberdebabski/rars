@@ -2208,10 +2208,12 @@ fn extraction_refuses_overwrite_unless_explicitly_allowed() {
         .output()
         .unwrap();
     assert_eq!(second.status.code(), Some(1));
+    let diagnostic = stderr(&second);
     assert!(
-        stderr(&second).contains(&native_error.to_string()),
-        "stderr: {}",
-        stderr(&second)
+        diagnostic.contains("failed to write extracted entry")
+            && diagnostic.contains("I/O error:")
+            && diagnostic.contains(&out_dir.display().to_string()),
+        "stderr: {diagnostic}"
     );
     assert_eq!(fs::read(&destination).unwrap(), existing);
 
