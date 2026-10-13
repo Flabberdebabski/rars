@@ -72,6 +72,26 @@ jobs:
       - name: Tests
         run: cargo test --workspace --locked
 
+  native-cli:
+    name: Native CLI (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    env:
+      CARGO_BUILD_JOBS: 2
+      RUST_TEST_THREADS: 2
+      RAYON_NUM_THREADS: 2
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Test the CLI on the native filesystem
+        run: cargo test -p rars-cli --locked
+
   reader-features:
     name: Independent reader feature matrix
     runs-on: ubuntu-latest
