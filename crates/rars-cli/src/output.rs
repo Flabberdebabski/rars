@@ -822,7 +822,9 @@ mod tests {
                     "archive path conflicts with extraction storage"
                 ))
             ));
-            assert_eq!(fs::read_dir(&storage).unwrap().count(), 1);
+            // The earlier member was published before the alias was refused.
+            assert_eq!(fs::read_dir(&storage).unwrap().count(), 0);
+            assert!(root.join("ordinary").exists());
         } else {
             assert!(result.is_ok());
         }
