@@ -1097,7 +1097,6 @@ impl RarBuilder {
     /// For an existing RarFile, its configured password is used. Preservation
     /// reuses it for encrypted output; conversion removes encryption.
     /// Input files must remain available and unchanged until writing completes.
-    /// See python/REWRITING.md for the supported subset and output guarantees.
     #[staticmethod]
     /// Payload staging happens afresh during each write. staging_dir defaults
     /// to the output directory (current directory for to_bytes); max_staged_bytes

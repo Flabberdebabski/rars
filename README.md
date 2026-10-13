@@ -21,190 +21,21 @@ has since matured as it gained some users. It's still a bit slower than WinRAR,
 uses more memory and has slightly worse compression. It could use more testing
 at volume, too. Other than that it's in pretty good shape.
 
-## Usage
-
-The API is in the `rars` crate, which is used by the Python and TypeScript
-bindings. For the CLI, run:
-
-`cargo install rars-cli`.
-
-To inspect, test, and extract archives:
+## Install
 
 ```sh
-rars info archive.rar
-rars test archive.rar
+cargo install rars-cli       # the CLI
+cargo add rars               # the Rust library
+pip install rars             # Python
+npm install @bitplane/rars   # JavaScript, as WebAssembly for Node or the browser
+```
+
+Then `rars --help`. For example:
+
+```sh
 rars x archive.rar out/
+rars a --format rar29 --solid archive.rar files...
+rars a --format rar70 --volume-size 10m archive.part1.rar files...
 ```
-
-These commands accept parsing and decoding limits; see
-[CLI reader controls](CLI_READING.md).
-
-To create archives with a specific RAR generation:
-
-```sh
-rars a --format rar29 archive.rar files...
-rars a --format rar29 --solid --auto-filter archive.rar files...
-rars a --format rar70 --store --volume-size 10m archive.part1.rar files...
-```
-
-The writer supports stored and compressed members, split volumes, passwords,
-comments, RARVM filters, RAR5 quick-open records, recovery records and header
-encryption. There are a lot of things I won't list here, so run `rars --help`
-for more details.
-
-On Unix, native filenames and legacy archive names can contain non-UTF-8 bytes.
-The CLI, Python extraction and Rust path adapters preserve those bytes. RAR5/7
-filesystem inputs use the format's reversible Unix byte mapping; member metadata
-and lookup keys retain the encoded archive identity. Use byte names (or Python
-`RarInfo` objects) for exact lookup, rather than lossy display names.
-
-Legacy code pages are not guessed. Windows supports Unicode names; extracting
-non-Unicode legacy byte names there still requires caller-selected decoding.
-Use `--legacy-name-encoding cp850` or the corresponding binding option; see
-[legacy filename decoding](FILENAME_ENCODINGS.md) for supported encodings and
-preservation semantics.
-
-## Library features
-
-The workspace supports Rust 1.89 and newer. CI checks this minimum as well as
-the current stable compiler.
-
-All features are enabled by default. For a sequential reader without encoders,
-recovery algorithms, cryptographic dependencies or Rayon:
-
-```toml
-[dependencies]
-rars = { version = "0.10", default-features = false }
-```
-
-Enable encrypted reading independently when needed:
-
-```toml
-rars = { version = "0.10", default-features = false, features = ["encryption"] }
-```
-
-Use `Archive::member_refs()` to inspect headers without copying names or extra
-records. For repeated metadata lookup, `Archive::index()` builds an optional
-index that borrows those headers and keeps duplicate entries addressable by
-archive-order index. Its storage belongs to the caller; the archive cannot be
-mutated while the borrowed index is in use. Ordinary `members()` still returns
-owned metadata.
-
-Use `read_members_at()` or `read_members_at_with_options()` to read several
-indices in one session, especially for solid archives. Results retain request
-order and duplicate indices; shared output budgets count each decoded payload
-and required predecessor once. The corresponding `read_volume_members_at*`
-functions traverse a volume set once; that traversal currently verifies all
-payloads, including unselected ones.
-
-| Feature | Adds |
-| --- | --- |
-| None | Parsing and sequential decoding for RAR 1.3–7, metadata, checksums, comments, solid/split archives, cancellation and reader resource policies |
-| `write` | Encoders, `Builder`, writer resources, archive writing and rewriting |
-| `recovery` | Recovery generation and repair; recovery metadata remains readable without this feature |
-| `encryption` | Encrypted headers and payloads, password derivation and cryptographic dependencies |
-| `parallel` | Rayon execution on supported native targets |
-
-Every combination is supported. Writing encrypted archives requires `write` and
-`encryption`; writing recovery records requires `write` and `recovery`. Recovery
-repair works without `write`. Without `parallel`, buffered extraction APIs use
-sequential execution; bare WebAssembly also runs sequentially. Writing and
-recovery enable entropy support, including encrypted header reconstruction during
-repair; encrypted reading alone does not need entropy.
-
-RAR5 recovery repair checks a workspace ceiling before allocating solve
-matrices, their working copies, RHS scratch and repaired or padded shard output.
-The ceiling is four times the archive and recovery bytes supplied, and never
-less than 256 MiB, so genuine archives of any size fit while a small record
-declaring huge geometry is refused. Incomplete-record rebuilding also checks
-its full encoder matrix, resident parity, framing scratch and intermediate
-record buffer against that ceiling.
-An oversized solve returns a `ResourceLimit` error; an oversized rebuild keeps
-the repaired prefix and existing incomplete record. Archive input, parsed record
-storage, shared field tables, final collected archive output and allocator or
-control overhead are excluded, so this is not a process-RAM quota.
-
-Without `encryption`, plaintext headers still expose encrypted member metadata.
-Opening encrypted headers or extracting encrypted payloads returns
-`Error::FeatureDisabled { feature: "encryption" }`, even if a password is supplied.
-Recovery operations similarly return a disabled-feature error without `recovery`.
-These errors have `ErrorKind::UnsupportedFeature`. Writer and encoder APIs are
-absent when `write` is disabled. RAR 1.3's fixed archive-comment transformation
-remains available to readers without `encryption`.
-
-Cargo unifies features across consumers of the same crate. Another dependency
-that enables `rars` defaults can therefore restore the full build. Use
-`cargo tree -e features` to inspect the resolved configuration. The CLI, Python
-and npm bindings retain their full builds. See the
-[independent consumer checks](scripts/reader-consumer/README.md) for reproduction
-commands that avoid workspace feature unification.
-
-## Reader resources
-
-Reader workspace limits are available as Rust
-`ArchiveReadOptions::with_max_reader_workspace_bytes`, CLI
-`--max-reader-workspace-bytes`, Python `ReadOptions(max_reader_workspace_bytes=...)`
-and npm `maxReaderWorkspaceBytes`. They limit aggregate decoder workspace and
-queued parallel results across an extraction call or volume set. The default is unlimited. Logical output, parsed sources and
-caller output storage have separate costs; see the
-[reader resource contract](READER_RESOURCE_CONTRACT.md).
-
-## Writer execution
-
-For writer execution modes, workspace estimates and retained storage, see
-[WRITER_EXECUTION.md](WRITER_EXECUTION.md).
-
-RAR5/7 writers accept an optional aggregate managed-memory ceiling: Rust
-`WriterResources::with_max_memory_bytes`, CLI `rars a --max-memory 256m`,
-Python `RarBuilder(max_memory_bytes=256 << 20)`, and npm
-`new RarWriter({ maxMemoryBytes: 256 * 1024 * 1024 })`.
-The default is unlimited. This counts writer execution allocations and retained
-output, including binding copy peaks; caller inputs, sinks, runtime and allocator
-overhead are excluded. Legacy writers refuse the policy. Reader and rewrite
-staging limits are separate. See [the resource contract](WRITER_RESOURCE_CONTRACT.md)
-for ownership boundaries and the separate estimated-workspace policy.
-
-For focused performance checks, use `cargo bench -p rars --bench parallel --
-parallel_rar50_extraction` or select `parallel_rar50_compression`. Pools are
-created outside timing and compression setup clones source handles without
-copying payloads. Input copying and pool creation have separate benchmarks.
-Runs default to one and two threads; set `RARS_BENCH_THREADS=1,2,4` explicitly
-for a wider comparison. Keep build concurrency low with `CARGO_BUILD_JOBS=1`.
-`cargo bench -p rars --bench huffman_tables` measures decoder table construction
-and checkpoint copying separately, with fixed inputs prepared outside the timer.
-It also works with `--no-default-features`.
-
-Record the source revision, compiler, benchmark selection and thread counts
-beside saved results under `target/`; compare measurements with the same setup.
-
-## Bindings
-
-Python bindings are published to [pypi](https://pypi.org/project/rars/), so you
-can `pip install rars`. To build locally, it's `just python`.
-
-`RarBuilder.from_archive` preserves supported RAR5/7 metadata and archive settings
-by default, plus a limited subset of ordinary RAR2.9–4.x archives. Unsupported
-preservation is rejected. Pass `preserve=False` explicitly
-to convert to unencrypted RAR5, including from older archives. This default change
-is intended for the next minor release; see the [rewrite contract](python/REWRITING.md).
-
-`RarBuilder` writes accept `cancellation=rars.CancellationToken()` for
-cooperative cancellation from another Python thread, with or without progress
-callbacks. Reader operations accept `options=rars.ReadOptions(...)` for
-cancellation, output ceilings and RAR5/7 decoder limits. See the
-[reader controls](python/READING.md) and [rewrite contract](python/REWRITING.md).
-Repair operations also accept `cancellation=`; see [repair cancellation](python/REPAIRING.md).
-
-Writer progress reports `percentage=None` while the final output size is unknown,
-and 100 when the operation or a volume completes. Legacy single-archive output streams directly;
-compressed or encrypted members still require memory, stored sources are read
-twice for checksum verification, and legacy volume output still collects the
-volume set in memory. A failed write to a caller-owned stream can leave a prefix;
-writing to a path publishes the completed archive atomically.
-
-For JS it's built to WebAssembly and published to
-[npm](https://www.npmjs.com/package/@bitplane/rars);
-`npm install @bitplane/rars`. It reads and writes in the browser and in Node,
-with no native module. To build locally, type `just npm`.
 
 Licensed under the [Apache License, Version 2.0](COPYING).

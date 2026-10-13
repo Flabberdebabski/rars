@@ -82,7 +82,7 @@ support remains separate work.
 including decoder state and queued parallel payloads. Source buffers, JavaScript
 objects and returned bytes are outside the quota. Capacity replacement overlap
 counts; this is not a process RAM limit. Refusals retain the resource error code
-and byte details. See the [reader resource contract](https://github.com/bitplane/rars/blob/master/READER_RESOURCE_CONTRACT.md).
+and byte details.
 
 ## Write
 

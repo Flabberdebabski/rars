@@ -5,8 +5,7 @@
 //! Service payloads borrow input and are encrypted in chunks during emission.
 //! Quick-open data uses a quota-controlled spool. Once block lengths are known,
 //! final archive output streams in one pass. The
-//! workspace admission budget is not an aggregate RAM or disk quota; see
-//! WRITER_EXECUTION.md in the repo.
+//! workspace admission budget is not an aggregate RAM or disk quota.
 //!
 //! Stored payloads are reread and verified during emission. Recovery requires
 //! a further pass over the preceding archive bytes, mirrored into a spool.
