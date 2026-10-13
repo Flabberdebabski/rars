@@ -195,7 +195,9 @@ fn entry_result<B: Budget>(
     value
         .map(|entry| match entry {
             ParallelExtractedEntry::File { meta, data } => (format!("{meta:?}"), data.to_vec()),
-            ParallelExtractedEntry::Directory(meta) => (format!("{meta:?}"), Vec::new()),
+            ParallelExtractedEntry::Directory(meta) | ParallelExtractedEntry::Verified(meta) => {
+                (format!("{meta:?}"), Vec::new())
+            }
             ParallelExtractedEntry::Redirection { meta, redirection } => {
                 (format!("{meta:?} {redirection:?}"), Vec::new())
             }
@@ -245,6 +247,7 @@ fn independent_history_worker_limited_keeps_original_attempts_callbacks_and_erro
                     None,
                     u64::MAX,
                     actual_options,
+                    false,
                     &actual,
                 ));
                 assert_eq!(output, expected, "filter={filter:?}, fail_at={fail_at}");
