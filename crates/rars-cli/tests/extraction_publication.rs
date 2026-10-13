@@ -219,7 +219,12 @@ fn case_aliases_are_refused_on_insensitive_filesystems_and_kept_on_sensitive_one
     if insensitive {
         assert!(!result.status.success());
         assert!(String::from_utf8_lossy(&result.stderr).contains("same output path"));
-        assert_eq!(fs::read_dir(destination).unwrap().count(), 0);
+        // The first name was verified and published before its alias was refused.
+        assert_eq!(
+            fs::read(destination.join("A.txt")).unwrap(),
+            b"first contents"
+        );
+        assert_eq!(fs::read_dir(destination).unwrap().count(), 1);
     } else {
         assert!(
             result.status.success(),
