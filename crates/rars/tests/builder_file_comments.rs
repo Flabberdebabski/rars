@@ -40,9 +40,9 @@ fn rar5_comment_before_first_file_belongs_to_archive() {
     let Archive::Rar50Plus(ref mut rar50) = archive else {
         unreachable!()
     };
-    assert!(matches!(rar50.blocks[0], rars::rar50::Block::File(_)));
-    assert!(matches!(rar50.blocks[1], rars::rar50::Block::Service(_)));
-    rar50.blocks.swap(0, 1);
+    assert!(matches!(rar50.blocks[1], rars::rar50::Block::File(_)));
+    assert!(matches!(rar50.blocks[2], rars::rar50::Block::Service(_)));
+    rar50.blocks.swap(1, 2);
 
     assert_eq!(archive.comment(None).unwrap(), Some(b"note".to_vec()));
     assert_eq!(archive.member_comments(None).unwrap(), vec![None]);

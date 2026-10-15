@@ -446,6 +446,7 @@ impl Archive {
                 }
                 let mut index = 0;
                 let mut comment_seen = false;
+                let mut producer_seen = false;
                 for block in &archive.blocks {
                     match block {
                         Block::File(file) => {
@@ -478,6 +479,16 @@ impl Archive {
                             index += 1;
                         }
                         Block::Service(service) => {
+                            if service.name == crate::rar50::producer::NAME {
+                                if producer_seen
+                                    || index != 0
+                                    || !crate::rar50::producer::is_replaceable(service, archive)
+                                {
+                                    issues.push("unsupported producer service".into());
+                                }
+                                producer_seen = true;
+                                continue;
+                            }
                             if service.name == b"QO" || service.name == b"RR" {
                                 if !derived_services.insert(service.name.clone())
                                     || !service.rewrite_metadata_complete

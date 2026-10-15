@@ -262,13 +262,14 @@ pub(super) fn write_archive(
     // Everything between the main header and the quick-open block, in order.
     // Entries and their owned service vectors contain records larger than a byte
     // in disjoint live storage. Their combined count fits usize, including
-    // the single optional archive comment. This relies on services being owned
-    // vectors, rather than shared or borrowed lists counted repeatedly.
+    // the producer record and optional archive comment. This relies on services
+    // being owned vectors, rather than shared lists counted repeatedly.
     let block_count = entries.iter().fold(
-        usize::from(plan.archive_comment.is_some()),
+        1 + usize::from(plan.archive_comment.is_some()),
         |total, entry| total + 1 + entry.services.len(),
     );
     let mut blocks = Records::<PreparedBlock>::new(block_count, resources)?;
+    blocks.push(producer_block(header_keys.as_ref(), resources)?)?;
     if let Some(comment) = &plan.archive_comment {
         blocks.push(prepare_comment(comment, header_keys.as_ref(), resources)?)?;
     }
@@ -578,6 +579,42 @@ fn stored_service_header(
         header_keys,
         resources,
     )
+}
+
+// Archive-level identification is not a member or a quick-open entry. Its
+// payload stays public even with encrypted headers, identifying the producing
+// library without disclosing archive contents or borrowing the user's comment.
+fn producer_block(
+    header_keys: Option<&HeaderEncryptionKeys>,
+    resources: &WriterResources,
+) -> Result<PreparedBlock<'static>> {
+    use crate::rar50::producer::{DATA, FLAGS, NAME};
+    let data = DATA;
+    let specific = stored_file_specific(
+        NAME,
+        data.len() as u64,
+        crate::crc32::crc32(data),
+        0,
+        None,
+        0,
+        resources,
+    )?;
+    let header = prepared_header_image(
+        HEAD_SERVICE,
+        FLAGS,
+        Some(data.len() as u64),
+        &specific,
+        &[],
+        header_keys,
+        resources,
+    )?;
+    Ok(PreparedBlock {
+        header,
+        payload: Payload::Borrowed(data),
+        payload_len: data.len() as u64,
+        quick_open_cached: false,
+        entry_index: None,
+    })
 }
 
 fn prepare_comment<'a>(
@@ -1531,7 +1568,11 @@ impl VolumeWriter<'_> {
     }
 
     fn start_volume(&mut self) -> Result<()> {
-        self.body = Some(Spool::create(self.resources)?);
+        let mut body = Spool::create(self.resources)?;
+        let marker = producer_block(self.header_keys, self.resources)?;
+        body.write_all(&marker.header)?;
+        write_payload(marker.payload, &mut body, self.resources, self.progress)?;
+        self.body = Some(body);
         self.payload_in_volume = 0;
         Ok(())
     }
@@ -2108,7 +2149,7 @@ mod emission_ledger_tests {
                 assert_eq!(raw.files().count(), count);
                 assert_eq!(
                     raw.services().count(),
-                    usize::from(comment) + usize::from(count == 2)
+                    1 + usize::from(comment) + usize::from(count == 2)
                 );
                 for index in 0..count {
                     assert_eq!(

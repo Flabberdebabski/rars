@@ -253,7 +253,13 @@ fn retains_windows_links_and_file_copy_records() {
         if kind >= 4 {
             let mut broken = output.clone();
             if let rars::Archive::Rar50Plus(archive) = &mut broken {
-                if let rars::rar50::Block::File(file) = &mut archive.blocks[1] {
+                if let rars::rar50::Block::File(file) = archive
+                    .blocks
+                    .iter_mut()
+                    .filter(|block| matches!(block, rars::rar50::Block::File(_)))
+                    .nth(1)
+                    .unwrap()
+                {
                     file.redirection.as_mut().unwrap().target_name = b"missing".to_vec();
                 }
             }

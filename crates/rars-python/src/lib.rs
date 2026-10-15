@@ -2842,6 +2842,16 @@ mod tests {
                     } else {
                         0
                     };
+                    // Both the diagnostic preflight and preserving_builder
+                    // validate the small producer payload. Neither should read
+                    // member data beyond the single link metadata pass.
+                    let producer_checks = archive.as_rar50().map_or(0, |archive| {
+                        2 * archive
+                            .services()
+                            .filter(|service| service.name == b"RARS")
+                            .map(|service| service.packed_size())
+                            .sum::<u64>()
+                    });
                     let source = Py::new(
                         py,
                         RarFile {
@@ -2866,7 +2876,7 @@ mod tests {
                     .unwrap();
                     assert_eq!(
                         bytes.swap(0, Ordering::Relaxed),
-                        metadata_pass,
+                        metadata_pass + producer_checks,
                         "{format}: only one link metadata pass is allowed"
                     );
                     for _ in 0..2 {

@@ -391,7 +391,12 @@ fn preservation_preflight_refuses_metadata_it_cannot_rewrite() {
     );
     check(
         |archive| {
-            if let rar50::Block::File(file) = &mut archive.blocks[0] {
+            if let rar50::Block::File(file) = archive
+                .blocks
+                .iter_mut()
+                .find(|block| matches!(block, rar50::Block::File(_)))
+                .unwrap()
+            {
                 file.name = b"../file".to_vec();
             }
         },
@@ -399,7 +404,12 @@ fn preservation_preflight_refuses_metadata_it_cannot_rewrite() {
     );
     check(
         |archive| {
-            if let rar50::Block::File(file) = &mut archive.blocks[0] {
+            if let rar50::Block::File(file) = archive
+                .blocks
+                .iter_mut()
+                .find(|block| matches!(block, rar50::Block::File(_)))
+                .unwrap()
+            {
                 file.host_os = 99;
             }
         },
@@ -407,7 +417,12 @@ fn preservation_preflight_refuses_metadata_it_cannot_rewrite() {
     );
     check(
         |archive| {
-            if let rar50::Block::File(file) = &mut archive.blocks[0] {
+            if let rar50::Block::File(file) = archive
+                .blocks
+                .iter_mut()
+                .find(|block| matches!(block, rar50::Block::File(_)))
+                .unwrap()
+            {
                 file.block.flags |= 8;
             }
         },
@@ -415,7 +430,12 @@ fn preservation_preflight_refuses_metadata_it_cannot_rewrite() {
     );
     check(
         |archive| {
-            if let rar50::Block::File(file) = &mut archive.blocks[0] {
+            if let rar50::Block::File(file) = archive
+                .blocks
+                .iter_mut()
+                .find(|block| matches!(block, rar50::Block::File(_)))
+                .unwrap()
+            {
                 file.host_os = 1;
                 file.attributes = 1 << 20;
             }
@@ -424,7 +444,12 @@ fn preservation_preflight_refuses_metadata_it_cannot_rewrite() {
     );
     check(
         |archive| {
-            if let rar50::Block::File(file) = &mut archive.blocks[0] {
+            if let rar50::Block::File(file) = archive
+                .blocks
+                .iter_mut()
+                .find(|block| matches!(block, rar50::Block::File(_)))
+                .unwrap()
+            {
                 file.host_os = 1;
                 file.file_flags |= 1;
                 file.attributes = 0o100644;
@@ -434,7 +459,12 @@ fn preservation_preflight_refuses_metadata_it_cannot_rewrite() {
     );
     check(
         |archive| {
-            if let rar50::Block::File(file) = &mut archive.blocks[0] {
+            if let rar50::Block::File(file) = archive
+                .blocks
+                .iter_mut()
+                .find(|block| matches!(block, rar50::Block::File(_)))
+                .unwrap()
+            {
                 file.host_os = 0;
                 file.attributes = 0x10;
             }
@@ -443,7 +473,12 @@ fn preservation_preflight_refuses_metadata_it_cannot_rewrite() {
     );
     check(
         |archive| {
-            if let rar50::Block::File(file) = &mut archive.blocks[0] {
+            if let rar50::Block::File(file) = archive
+                .blocks
+                .iter_mut()
+                .find(|block| matches!(block, rar50::Block::File(_)))
+                .unwrap()
+            {
                 file.block.flags |= 0x100;
             }
         },
@@ -451,7 +486,12 @@ fn preservation_preflight_refuses_metadata_it_cannot_rewrite() {
     );
     check(
         |archive| {
-            if let rar50::Block::File(file) = &mut archive.blocks[0] {
+            if let rar50::Block::File(file) = archive
+                .blocks
+                .iter_mut()
+                .find(|block| matches!(block, rar50::Block::File(_)))
+                .unwrap()
+            {
                 file.file_flags |= 8;
             }
         },
@@ -459,7 +499,12 @@ fn preservation_preflight_refuses_metadata_it_cannot_rewrite() {
     );
     check(
         |archive| {
-            if let rar50::Block::File(file) = &mut archive.blocks[0] {
+            if let rar50::Block::File(file) = archive
+                .blocks
+                .iter_mut()
+                .find(|block| matches!(block, rar50::Block::File(_)))
+                .unwrap()
+            {
                 file.compression_info |= 1 << 21;
             }
         },
@@ -467,7 +512,12 @@ fn preservation_preflight_refuses_metadata_it_cannot_rewrite() {
     );
     check(
         |archive| {
-            if let rar50::Block::File(file) = &mut archive.blocks[0] {
+            if let rar50::Block::File(file) = archive
+                .blocks
+                .iter_mut()
+                .find(|block| matches!(block, rar50::Block::File(_)))
+                .unwrap()
+            {
                 file.compression_info = (file.compression_info & !0x3f) | 2;
             }
         },
@@ -475,7 +525,12 @@ fn preservation_preflight_refuses_metadata_it_cannot_rewrite() {
     );
     check(
         |archive| {
-            if let rar50::Block::File(file) = &mut archive.blocks[0] {
+            if let rar50::Block::File(file) = archive
+                .blocks
+                .iter_mut()
+                .find(|block| matches!(block, rar50::Block::File(_)))
+                .unwrap()
+            {
                 file.compression_info |= 0x40;
             }
         },

@@ -126,6 +126,7 @@ fn large_rar50_delta_filter_rejects_invalid_channels_without_committing_history(
 fn service_names(archive: &Archive) -> Vec<String> {
     archive
         .services()
+        .filter(|service| service.name != b"RARS")
         .map(|service| service.name_lossy())
         .collect()
 }
@@ -735,7 +736,10 @@ fn rar50_writer_builder_writes_stored_archive_with_comment_and_metadata() {
         .unwrap();
 
     let archive = Archive::parse(&bytes).unwrap();
-    let services: Vec<_> = archive.services().collect();
+    let services: Vec<_> = archive
+        .services()
+        .filter(|service| service.name != b"RARS")
+        .collect();
     assert_eq!(services.len(), 1);
     assert_eq!(services[0].name, b"CMT");
     assert_eq!(
@@ -1319,7 +1323,10 @@ fn writes_compressed_rar50_volume_set_with_recovery_records() {
         .iter()
         .all(|archive| archive.main.has_recovery_record()));
     for archive in &archives {
-        let service = archive.services().next().unwrap();
+        let service = archive
+            .services()
+            .find(|service| service.name != b"RARS")
+            .unwrap();
         assert_eq!(service.name_lossy(), "RR");
         assert_eq!(service.recovery_record().unwrap().unwrap().percent, 8);
         assert_rar5_inline_recovery_chunks(&service.packed_data(archive).unwrap());
@@ -1430,7 +1437,10 @@ fn writes_rar50_archive_comment_service_record() {
     .unwrap();
 
     let archive = Archive::parse(&bytes).unwrap();
-    let services: Vec<_> = archive.services().collect();
+    let services: Vec<_> = archive
+        .services()
+        .filter(|service| service.name != b"RARS")
+        .collect();
     assert_eq!(services.len(), 1);
     assert_eq!(services[0].name, b"CMT");
     assert!(services[0].is_stored());
@@ -1459,7 +1469,10 @@ fn writes_compressed_rar50_archive_comment_service_record() {
     .unwrap();
 
     let archive = Archive::parse(&bytes).unwrap();
-    let services: Vec<_> = archive.services().collect();
+    let services: Vec<_> = archive
+        .services()
+        .filter(|service| service.name != b"RARS")
+        .collect();
     assert_eq!(service_names(&archive), ["CMT"]);
     assert_eq!(
         collect_file(&archive, services[0]).unwrap().data,
@@ -1608,7 +1621,10 @@ fn writes_rar50_acl_and_stream_file_service_records() {
     .unwrap();
 
     let archive = Archive::parse(&bytes).unwrap();
-    let services: Vec<_> = archive.services().collect();
+    let services: Vec<_> = archive
+        .services()
+        .filter(|service| service.name != b"RARS")
+        .collect();
     assert_eq!(service_names(&archive), ["ACL", "STM"]);
     assert!(services.iter().all(|service| service.is_stored()));
     assert_eq!(
@@ -1645,7 +1661,10 @@ fn writes_rar50_file_comment_service_record() {
     .unwrap();
 
     let archive = Archive::parse(&bytes).unwrap();
-    let services: Vec<_> = archive.services().collect();
+    let services: Vec<_> = archive
+        .services()
+        .filter(|service| service.name != b"RARS")
+        .collect();
     assert_eq!(service_names(&archive), ["CMT"]);
     assert!(services[0].is_stored());
     assert_eq!(
@@ -1756,7 +1775,10 @@ fn writes_encrypted_rar50_file_comment_service_record() {
     .unwrap();
 
     let archive = Archive::parse(&bytes).unwrap();
-    let services: Vec<_> = archive.services().collect();
+    let services: Vec<_> = archive
+        .services()
+        .filter(|service| service.name != b"RARS")
+        .collect();
     assert_eq!(service_names(&archive), ["CMT"]);
     assert!(services[0].encrypted);
     assert!(matches!(
@@ -1769,7 +1791,14 @@ fn writes_encrypted_rar50_file_comment_service_record() {
     ));
 
     let archive = Archive::parse_with_password(&bytes, Some(b"secret")).unwrap();
-    let service = collect_file(&archive, archive.services().next().unwrap()).unwrap();
+    let service = collect_file(
+        &archive,
+        archive
+            .services()
+            .find(|service| service.name != b"RARS")
+            .unwrap(),
+    )
+    .unwrap();
     assert_eq!(service.data, b"encrypted RAR5 file comment from rars\n");
     let extracted = collect_extract(&archive).unwrap();
     assert_eq!(extracted.len(), 1);
@@ -1809,7 +1838,10 @@ fn writes_header_encrypted_rar50_file_comment_service_record() {
     // which has to be the same 2^15 as the per-file records below.
     assert_eq!(head_crypt_kdf_count(&bytes), 15);
     let archive = Archive::parse_with_password(&bytes, Some(b"secret")).unwrap();
-    let services: Vec<_> = archive.services().collect();
+    let services: Vec<_> = archive
+        .services()
+        .filter(|service| service.name != b"RARS")
+        .collect();
     assert_eq!(service_names(&archive), ["CMT"]);
     assert!(services[0].encrypted);
     assert_eq!(
@@ -1913,7 +1945,10 @@ fn writes_rar50_recovery_service_record() {
     assert!(archive.main.has_recovery_record());
     let locator = archive.main.locator().unwrap();
     let recovery_offset = locator.recovery_record_offset.unwrap();
-    let services: Vec<_> = archive.services().collect();
+    let services: Vec<_> = archive
+        .services()
+        .filter(|service| service.name != b"RARS")
+        .collect();
     assert_eq!(service_names(&archive), ["RR"]);
     assert_eq!(
         recovery_offset,
@@ -1981,7 +2016,13 @@ fn rejects_rar50_inline_recovery_when_all_recovery_chunks_are_damaged() {
     )
     .unwrap();
     let archive = Archive::parse(&bytes).unwrap();
-    let recovery_range = archive.services().next().unwrap().block.data_range.clone();
+    let recovery_range = archive
+        .services()
+        .find(|service| service.name != b"RARS")
+        .unwrap()
+        .block
+        .data_range
+        .clone();
     let mut damaged = bytes;
     damaged[recovery_range].fill(0);
 
@@ -2007,7 +2048,7 @@ fn rar50_recovery_rejects_a_public_service_offset_past_the_archive() {
         .blocks
         .iter_mut()
         .find_map(|block| match block {
-            rar50::Block::Service(service) => Some(service),
+            rar50::Block::Service(service) if service.name == b"RR" => Some(service),
             _ => None,
         })
         .unwrap();
@@ -2104,7 +2145,13 @@ fn rar50_recovery_observes_cancellation_from_output_in_both_repair_paths() {
     )
     .unwrap();
     let archive = Archive::parse(&bytes).unwrap();
-    let recovery_range = archive.services().next().unwrap().block.data_range.clone();
+    let recovery_range = archive
+        .services()
+        .find(|service| service.name != b"RARS")
+        .unwrap()
+        .block
+        .data_range
+        .clone();
     let mut damaged = bytes.clone();
     damaged[recovery_range.start + 0x48] ^= 1;
 
@@ -2133,7 +2180,13 @@ fn repairs_sfx_prefixed_rar50_data_with_a_missing_recovery_row() {
     let clean = Archive::parse(&prefixed).unwrap();
     assert_eq!(clean.sfx_offset, b"MZ SFX stub".len());
     let data_range = clean.files().next().unwrap().block.data_range.clone();
-    let recovery_range = clean.services().next().unwrap().block.data_range.clone();
+    let recovery_range = clean
+        .services()
+        .find(|service| service.name != b"RARS")
+        .unwrap()
+        .block
+        .data_range
+        .clone();
     let mut damaged = prefixed.clone();
     damaged[data_range.start + 128..data_range.start + 160].fill(0xa5);
     damaged[recovery_range.start + 0x48] ^= 0xff;
@@ -2197,7 +2250,12 @@ fn rejects_rar50_inline_recovery_service_header_damage_without_prefix_damage() {
     )
     .unwrap();
     let clean = Archive::parse(&bytes).unwrap();
-    let service_offset = clean.services().next().unwrap().block.offset;
+    let service_offset = clean
+        .services()
+        .find(|service| service.name != b"RARS")
+        .unwrap()
+        .block
+        .offset;
     let mut damaged = bytes.clone();
     damaged[service_offset] ^= 0xff;
 
@@ -2221,7 +2279,13 @@ fn repairs_rar50_inline_recovery_with_damaged_recovery_chunk() {
     .unwrap();
     let clean = Archive::parse(&bytes).unwrap();
     let data_range = clean.files().next().unwrap().block.data_range.clone();
-    let recovery_range = clean.services().next().unwrap().block.data_range.clone();
+    let recovery_range = clean
+        .services()
+        .find(|service| service.name != b"RARS")
+        .unwrap()
+        .block
+        .data_range
+        .clone();
     let mut damaged = bytes.clone();
     damaged[data_range.start + 10..data_range.start + 80].fill(0xa5);
     damaged[recovery_range.start + 0x48] ^= 0xff;
@@ -2257,7 +2321,13 @@ fn rebuilds_damaged_recovery_chunk_without_claiming_data_repair() {
     )
     .unwrap();
     let archive = Archive::parse(&bytes).unwrap();
-    let recovery_range = archive.services().next().unwrap().block.data_range.clone();
+    let recovery_range = archive
+        .services()
+        .find(|service| service.name != b"RARS")
+        .unwrap()
+        .block
+        .data_range
+        .clone();
     let mut damaged = bytes.clone();
     damaged[recovery_range.start + 0x48] ^= 0xff;
 
@@ -2313,7 +2383,13 @@ fn rebuilds_a_damaged_chunk_in_an_archive_storing_a_recovery_archive() {
     )
     .unwrap();
     let archive = Archive::parse(&bytes).unwrap();
-    let recovery_range = archive.services().next().unwrap().block.data_range.clone();
+    let recovery_range = archive
+        .services()
+        .find(|service| service.name != b"RARS")
+        .unwrap()
+        .block
+        .data_range
+        .clone();
     let mut damaged = bytes.clone();
     damaged[recovery_range.start + 0x48] ^= 0xff;
 
@@ -2342,7 +2418,13 @@ fn rebuilds_a_header_encrypted_archive_end_from_a_parsed_archive() {
     )
     .unwrap();
     let archive = Archive::parse_with_password(&bytes, Some(b"password")).unwrap();
-    let recovery_range = archive.services().next().unwrap().block.data_range.clone();
+    let recovery_range = archive
+        .services()
+        .find(|service| service.name != b"RARS")
+        .unwrap()
+        .block
+        .data_range
+        .clone();
     let mut damaged = bytes.clone();
     damaged.truncate(recovery_range.end);
     damaged[recovery_range.start + 0x48] ^= 0xff;
@@ -2482,7 +2564,10 @@ fn writes_compressed_rar50_recovery_service_record() {
     assert!(archive.main.has_recovery_record());
     let locator = archive.main.locator().unwrap();
     let recovery_offset = locator.recovery_record_offset.unwrap();
-    let services: Vec<_> = archive.services().collect();
+    let services: Vec<_> = archive
+        .services()
+        .filter(|service| service.name != b"RARS")
+        .collect();
     assert_eq!(service_names(&archive), ["RR"]);
     assert_eq!(
         recovery_offset,
@@ -2607,7 +2692,10 @@ fn writes_stored_rar50_volume_set_with_recovery_records() {
     assert!(archives.iter().all(|archive| archive.main.is_volume()));
     for archive in &archives {
         assert!(archive.main.has_recovery_record());
-        let service = archive.services().next().unwrap();
+        let service = archive
+            .services()
+            .find(|service| service.name != b"RARS")
+            .unwrap();
         assert_eq!(service.name_lossy(), "RR");
         assert_eq!(service.recovery_record().unwrap().unwrap().percent, 8);
         let locator = archive.main.locator().unwrap();
@@ -2953,8 +3041,14 @@ fn writes_encrypted_rar50_archive_comment_service_that_reader_extracts_with_pass
 
     let archive = Archive::parse(&bytes).unwrap();
     let second_archive = Archive::parse(&second).unwrap();
-    let services: Vec<_> = archive.services().collect();
-    let second_services: Vec<_> = second_archive.services().collect();
+    let services: Vec<_> = archive
+        .services()
+        .filter(|service| service.name != b"RARS")
+        .collect();
+    let second_services: Vec<_> = second_archive
+        .services()
+        .filter(|service| service.name != b"RARS")
+        .collect();
     assert_eq!(services.len(), 1);
     assert_eq!(services[0].name, b"CMT");
     assert!(services[0].encrypted);
@@ -2972,7 +3066,14 @@ fn writes_encrypted_rar50_archive_comment_service_that_reader_extracts_with_pass
     ));
 
     let archive = Archive::parse_with_password(&bytes, Some(b"password")).unwrap();
-    let comment = collect_file(&archive, archive.services().next().unwrap()).unwrap();
+    let comment = collect_file(
+        &archive,
+        archive
+            .services()
+            .find(|service| service.name != b"RARS")
+            .unwrap(),
+    )
+    .unwrap();
     assert_eq!(comment.data, b"encrypted CMT from rars\n");
     let extracted = collect_extract(&archive).unwrap();
     assert_eq!(extracted[0].data, entry_data(&entries[0]));
@@ -2995,7 +3096,10 @@ fn writes_encrypted_compressed_rar50_archive_comment_service_with_password() {
     .unwrap();
 
     let archive = Archive::parse(&bytes).unwrap();
-    let services: Vec<_> = archive.services().collect();
+    let services: Vec<_> = archive
+        .services()
+        .filter(|service| service.name != b"RARS")
+        .collect();
     assert_eq!(services.len(), 1);
     assert_eq!(services[0].name, b"CMT");
     assert!(services[0].encrypted);
@@ -3009,7 +3113,14 @@ fn writes_encrypted_compressed_rar50_archive_comment_service_with_password() {
     ));
 
     let archive = Archive::parse_with_password(&bytes, Some(b"secret")).unwrap();
-    let comment = collect_file(&archive, archive.services().next().unwrap()).unwrap();
+    let comment = collect_file(
+        &archive,
+        archive
+            .services()
+            .find(|service| service.name != b"RARS")
+            .unwrap(),
+    )
+    .unwrap();
     assert_eq!(comment.data, b"encrypted compressed CMT from rars\n");
     let extracted = collect_extract(&archive).unwrap();
     assert_eq!(extracted[0].data, payload);
@@ -3052,7 +3163,10 @@ fn writes_encrypted_rar50_recovery_service_that_reader_extracts_with_password() 
         .unwrap();
     assert_ne!(file_encryption.salt, second_file_encryption.salt);
     assert_ne!(file_encryption.iv, second_file_encryption.iv);
-    let service = archive.services().next().unwrap();
+    let service = archive
+        .services()
+        .find(|service| service.name != b"RARS")
+        .unwrap();
     assert_eq!(service.name, b"RR");
     assert!(!service.encrypted);
     let recovery = service.recovery_record().unwrap().unwrap();
@@ -3104,7 +3218,10 @@ fn writes_encrypted_compressed_rar50_recovery_service_that_reader_extracts_with_
         .unwrap();
     assert_ne!(file_encryption.salt, second_file_encryption.salt);
     assert_ne!(file_encryption.iv, second_file_encryption.iv);
-    let service = archive.services().next().unwrap();
+    let service = archive
+        .services()
+        .find(|service| service.name != b"RARS")
+        .unwrap();
     assert_eq!(service.name, b"RR");
     assert!(!service.encrypted);
     assert_eq!(service.recovery_record().unwrap().unwrap().percent, 6);
@@ -3248,7 +3365,10 @@ fn writes_header_encrypted_rar50_archive_comment_service_that_reader_extracts_wi
 
     assert!(matches!(Archive::parse(&bytes), Err(Error::NeedPassword)));
     let archive = Archive::parse_with_password(&bytes, Some(b"password")).unwrap();
-    let services: Vec<_> = archive.services().collect();
+    let services: Vec<_> = archive
+        .services()
+        .filter(|service| service.name != b"RARS")
+        .collect();
     assert_eq!(services.len(), 1);
     assert_eq!(services[0].name, b"CMT");
     assert!(services[0].encrypted);
@@ -3278,7 +3398,10 @@ fn writes_header_encrypted_compressed_rar50_archive_comment_service_with_passwor
 
     assert!(matches!(Archive::parse(&bytes), Err(Error::NeedPassword)));
     let archive = Archive::parse_with_password(&bytes, Some(b"password")).unwrap();
-    let services: Vec<_> = archive.services().collect();
+    let services: Vec<_> = archive
+        .services()
+        .filter(|service| service.name != b"RARS")
+        .collect();
     assert_eq!(services.len(), 1);
     assert_eq!(services[0].name, b"CMT");
     assert!(services[0].encrypted);
@@ -3345,7 +3468,10 @@ fn writes_header_encrypted_rar50_recovery_service_that_reader_extracts_with_pass
     assert!(matches!(Archive::parse(&bytes), Err(Error::NeedPassword)));
     let archive = Archive::parse_with_password(&bytes, Some(b"password")).unwrap();
     assert!(archive.main.has_recovery_record());
-    let service = archive.services().next().unwrap();
+    let service = archive
+        .services()
+        .find(|service| service.name != b"RARS")
+        .unwrap();
     assert_eq!(service.name, b"RR");
     assert!(!service.encrypted);
     let recovery = service.recovery_record().unwrap().unwrap();
@@ -3380,7 +3506,10 @@ fn writes_header_encrypted_compressed_rar50_recovery_service_that_reader_extract
     assert!(matches!(Archive::parse(&bytes), Err(Error::NeedPassword)));
     let archive = Archive::parse_with_password(&bytes, Some(b"password")).unwrap();
     assert!(archive.main.has_recovery_record());
-    let service = archive.services().next().unwrap();
+    let service = archive
+        .services()
+        .find(|service| service.name != b"RARS")
+        .unwrap();
     assert_eq!(service.name, b"RR");
     assert!(!service.encrypted);
     assert_eq!(service.recovery_record().unwrap().unwrap().percent, 4);
@@ -3518,7 +3647,10 @@ fn writes_encrypted_stored_rar50_volume_set_with_recovery_records() {
         .iter()
         .all(|archive| archive.main.has_recovery_record()));
     for archive in &archives {
-        let service = archive.services().next().unwrap();
+        let service = archive
+            .services()
+            .find(|service| service.name != b"RARS")
+            .unwrap();
         assert_eq!(service.name_lossy(), "RR");
         assert!(!service.encrypted);
         assert_eq!(service.recovery_record().unwrap().unwrap().percent, 8);
@@ -3692,7 +3824,10 @@ fn writes_encrypted_compressed_rar50_volume_set_with_recovery_records() {
         .iter()
         .all(|archive| archive.main.has_recovery_record()));
     for archive in &archives {
-        let service = archive.services().next().unwrap();
+        let service = archive
+            .services()
+            .find(|service| service.name != b"RARS")
+            .unwrap();
         assert_eq!(service.name_lossy(), "RR");
         assert!(!service.encrypted);
         assert_eq!(service.recovery_record().unwrap().unwrap().percent, 8);
@@ -4081,7 +4216,13 @@ fn parses_winrar721_header_encrypted_quick_open_archive_with_password() {
     let locator = archive.main.locator().unwrap();
     assert!(locator.quick_open_offset.is_some_and(|offset| offset > 0));
     assert_eq!(service_names(&archive), ["QO"]);
-    assert!(archive.services().next().unwrap().encrypted);
+    assert!(
+        archive
+            .services()
+            .find(|service| service.name != b"RARS")
+            .unwrap()
+            .encrypted
+    );
 
     let extracted = collect_extract(&archive).unwrap();
     assert_eq!(extracted.len(), 1);
@@ -4100,7 +4241,10 @@ fn extracts_rar50_header_encrypted_comment_service_with_password() {
     ));
 
     let archive = Archive::parse_with_password(&bytes, Some(b"password")).unwrap();
-    let services: Vec<_> = archive.services().collect();
+    let services: Vec<_> = archive
+        .services()
+        .filter(|service| service.name != b"RARS")
+        .collect();
     assert_eq!(services.len(), 1);
     assert_eq!(services[0].name, b"CMT");
     assert!(services[0].encrypted);
@@ -4848,7 +4992,10 @@ fn parses_rar50_comment_service_archive() {
 
     assert_eq!(archive.files().count(), 1);
     assert_eq!(service_names(&archive), ["CMT"]);
-    let comment = archive.services().next().unwrap();
+    let comment = archive
+        .services()
+        .find(|service| service.name != b"RARS")
+        .unwrap();
     assert_eq!(comment.packed_size(), 30);
     assert_eq!(comment.unpacked_size, 30);
     assert!(comment.is_stored());
@@ -4860,7 +5007,10 @@ fn parses_rar50_quick_open_service_archive() {
 
     assert_eq!(archive.files().count(), 2);
     assert_eq!(service_names(&archive), ["QO"]);
-    let quick_open = archive.services().next().unwrap();
+    let quick_open = archive
+        .services()
+        .find(|service| service.name != b"RARS")
+        .unwrap();
     assert_eq!(quick_open.packed_size(), 162);
     assert_eq!(quick_open.unpacked_size, 162);
     assert!(quick_open.is_stored());
@@ -4873,7 +5023,10 @@ fn parses_rar50_recovery_service_archive() {
     assert!(archive.main.has_recovery_record());
     assert_eq!(archive.files().count(), 1);
     assert_eq!(service_names(&archive), ["RR"]);
-    let recovery = archive.services().next().unwrap();
+    let recovery = archive
+        .services()
+        .find(|service| service.name != b"RARS")
+        .unwrap();
     assert_eq!(recovery.packed_size(), 210);
     assert_eq!(recovery.unpacked_size, 210);
     assert_rar5_inline_recovery_chunks(&recovery.packed_data(&archive).unwrap());
@@ -4918,7 +5071,10 @@ fn reads_rar50_service_subdata_whose_size_underflows_by_one() {
     let archive = Archive::parse_path(fixture("subdata_size_underflow.rar")).unwrap();
 
     assert_eq!(service_names(&archive), ["RR"]);
-    let recovery = archive.services().next().unwrap();
+    let recovery = archive
+        .services()
+        .find(|service| service.name != b"RARS")
+        .unwrap();
     assert_eq!(recovery.service_data, Some(vec![0x0a]));
     let recovery = recovery.recovery_record().unwrap().unwrap();
     assert_eq!(recovery.percent, 10);
@@ -4932,7 +5088,10 @@ fn reads_rar50_service_subdata_whose_size_underflows_by_one() {
 fn rar50_one_byte_fold_is_limited_to_service_subdata() {
     // 0x03 is FHEXTRA_HTIME: same shape, wrong record type, so no fold.
     let archive = Archive::parse(&with_recovery_extra_area(b"\x01\x03\x0a")).unwrap();
-    let service = archive.services().next().unwrap();
+    let service = archive
+        .services()
+        .find(|service| service.name != b"RARS")
+        .unwrap();
     assert_eq!(service.service_data, None);
     assert!(service.recovery_record().is_err());
 }
@@ -4965,7 +5124,10 @@ fn parses_rar50_mixed_service_archive() {
     assert!(archive.main.has_recovery_record());
     assert_eq!(archive.files().count(), 2);
     assert_eq!(service_names(&archive), ["CMT", "QO", "RR"]);
-    let services: Vec<_> = archive.services().collect();
+    let services: Vec<_> = archive
+        .services()
+        .filter(|service| service.name != b"RARS")
+        .collect();
     assert_eq!(services[0].packed_size(), 30);
     assert_eq!(services[1].packed_size(), 162);
     assert_eq!(services[2].packed_size(), 526);
@@ -6135,7 +6297,7 @@ fn streaming_writer_attaches_file_services() {
             _ => None,
         })
         .collect();
-    assert_eq!(services, vec![b"CMT".to_vec()]);
+    assert_eq!(services, vec![b"RARS".to_vec(), b"CMT".to_vec()]);
     assert_eq!(collect_extract(&archive).unwrap().len(), 1);
 }
 

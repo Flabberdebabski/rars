@@ -22,6 +22,8 @@ mod extract;
 #[cfg(any(feature = "write", feature = "recovery"))]
 mod framing;
 #[cfg(feature = "write")]
+pub(crate) mod producer;
+#[cfg(feature = "write")]
 pub(crate) mod write;
 
 pub(crate) use extract::test_volumes_to;

@@ -21,6 +21,14 @@ has since matured as it gained some users. It's still a bit slower than WinRAR,
 uses more memory and has slightly worse compression. It could use more testing
 at volume, too. Other than that it's in pretty good shape.
 
+New RAR 5 and RAR 7 archives include a `RARS` service record identifying the
+producing rars library version. It is separate from files and user comments,
+and appears in every volume. The producer/version text remains readable even
+when archive headers are encrypted. It is advisory metadata, not authentication;
+other archivers may remove it when updating an archive. The record layout and
+compatibility results are documented in the
+[producer-marker report](scripts/producer-marker/README.md).
+
 ## Install
 
 ```sh
