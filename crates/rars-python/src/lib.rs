@@ -2851,6 +2851,12 @@ mod tests {
                             .filter(|service| service.name == b"RARS")
                             .map(|service| service.packed_size())
                             .sum::<u64>()
+                    }) + archive.as_rar15_40().map_or(0, |archive| {
+                        2 * archive
+                            .new_subs()
+                            .filter(|sub| sub.file.name == b"RARS")
+                            .map(|sub| sub.file.pack_size)
+                            .sum::<u64>()
                     });
                     let source = Py::new(
                         py,

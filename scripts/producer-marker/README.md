@@ -1,7 +1,8 @@
 # RAR 5 producer-marker investigation
 
 The CLI defaults to `rar50`. Its writer now emits the producer service described
-below, as does the shared RAR 7 writer. Older formats remain unchanged. Preserving
+below, as does the shared RAR 7 writer. RAR 3/4 use a corresponding
+[new-subblock marker](rar34/README.md); earlier formats remain unmarked. Preserving
 rewrites replace an intact schema-1 record with the current producer version;
 unknown, duplicate, misplaced or damaged records remain errors.
 

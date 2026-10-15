@@ -27,6 +27,8 @@ pub use write::{FileEntry, Rar29Method, StoredEntry, StreamingEntry, WriterOptio
 
 mod extract;
 #[cfg(feature = "write")]
+mod producer;
+#[cfg(feature = "write")]
 mod write;
 #[cfg(feature = "write")]
 pub use crate::streaming::{EntrySource, WriterResources};
@@ -1011,9 +1013,9 @@ impl Archive {
     #[cfg(feature = "write")]
     pub(crate) fn preservation_version(&self) -> ArchiveVersion {
         if self.main.has_encrypted_headers()
-            || self
-                .new_subs()
-                .any(|sub| sub.kind == NewSubKind::ArchiveComment)
+            || self.new_subs().any(|sub| {
+                sub.kind == NewSubKind::ArchiveComment || sub.file.name == crate::producer::NAME
+            })
         {
             ArchiveVersion::Rar30
         } else {
@@ -1155,6 +1157,7 @@ impl Archive {
         }
         let mut archive_comments = 0;
         let mut seen_file = false;
+        let mut producer_seen = false;
         for block in &self.blocks {
             match block {
                 Block::File(_) => seen_file = true,
@@ -1166,6 +1169,16 @@ impl Archive {
                             "legacy archive comment location or metadata is unsupported".into(),
                         );
                     }
+                }
+                Block::NewSub(sub) if sub.file.name == crate::producer::NAME => {
+                    if producer_seen
+                        || seen_file
+                        || !matches!(&sub.kind, NewSubKind::Unknown(name) if name == crate::producer::NAME)
+                        || !producer::is_replaceable(&sub.file, self)
+                    {
+                        issues.push("unsupported legacy producer service".into());
+                    }
+                    producer_seen = true;
                 }
                 Block::NewSub(sub) if sub.kind == NewSubKind::ArchiveComment => {
                     archive_comments += 1;

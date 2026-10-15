@@ -1763,7 +1763,12 @@ fn extracts_stored_newsub_comments_with_and_without_encryption() {
         bytes[start..start + 2].copy_from_slice(&crc.to_le_bytes());
         let archive = Archive::parse(&bytes).unwrap();
         assert!(archive.files().next().is_none());
-        assert!(archive.new_subs().next().unwrap().file.is_stored());
+        assert!(archive
+            .new_subs()
+            .find(|sub| sub.file.name != b"RARS")
+            .unwrap()
+            .file
+            .is_stored());
         let options = ArchiveReadOptions::with_optional_password(password);
         assert_eq!(
             archive
@@ -2321,7 +2326,10 @@ fn writes_rar3_newsub_archive_comment_that_reader_decodes() {
 
         let archive = Archive::parse(&bytes).unwrap();
         assert!(!archive.main.has_archive_comment());
-        let subblocks: Vec<_> = archive.new_subs().collect();
+        let subblocks: Vec<_> = archive
+            .new_subs()
+            .filter(|sub| sub.file.name != b"RARS")
+            .collect();
         assert_eq!(subblocks.len(), 1);
         assert_eq!(subblocks[0].kind, NewSubKind::ArchiveComment);
         assert_eq!(subblocks[0].file.name, b"CMT");
@@ -5522,7 +5530,10 @@ fn parses_rar300_comment_subblock_and_stored_file() {
     assert_eq!(archive.sfx_offset, 0);
     assert_eq!(archive.main.flags, 0);
 
-    let subblocks: Vec<_> = archive.new_subs().collect();
+    let subblocks: Vec<_> = archive
+        .new_subs()
+        .filter(|sub| sub.file.name != b"RARS")
+        .collect();
     assert_eq!(subblocks.len(), 1);
     assert_eq!(subblocks[0].kind, NewSubKind::ArchiveComment);
     assert_eq!(subblocks[0].file.name, b"CMT");
@@ -6452,7 +6463,10 @@ fn intact_rar300_recovery_record_leaves_archive_unchanged() {
 fn preserves_unknown_rar300_service_records_without_hiding_files() {
     let mut bytes = std::fs::read(fixture("rar300/with_recovery_rar300.rar")).unwrap();
     let original = Archive::parse(&bytes).unwrap();
-    let recovery = original.new_subs().next().unwrap();
+    let recovery = original
+        .new_subs()
+        .find(|sub| sub.file.name != b"RARS")
+        .unwrap();
     let start = recovery.file.block.offset;
     let name_start = start + 32;
     assert_eq!(&bytes[name_start..name_start + 2], b"RR");
@@ -6461,7 +6475,7 @@ fn preserves_unknown_rar300_service_records_without_hiding_files() {
 
     let parsed = Archive::parse(&bytes).unwrap();
     assert!(matches!(
-        parsed.new_subs().next().unwrap().kind,
+        parsed.new_subs().find(|sub| sub.file.name != b"RARS").unwrap().kind,
         NewSubKind::Unknown(ref name) if name == b"XY"
     ));
     assert_eq!(parsed.files().count(), original.files().count());

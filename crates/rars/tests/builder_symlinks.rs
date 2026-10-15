@@ -443,7 +443,12 @@ fn batch_link_targets_reject_invalid_targets_and_corrupt_dependencies() {
         let mut archive = ArchiveReader::read_owned(data).unwrap();
         // Alter the parsed expected CRC to isolate integrity failure from decoding.
         if let rars::Archive::Rar15To40(legacy) = &mut archive {
-            if let rars::rar15_40::Block::File(file) = &mut legacy.blocks[0] {
+            if let rars::rar15_40::Block::File(file) = legacy
+                .blocks
+                .iter_mut()
+                .find(|block| matches!(block, rars::rar15_40::Block::File(_)))
+                .unwrap()
+            {
                 file.file_crc ^= 1;
             } else {
                 panic!("expected first file");

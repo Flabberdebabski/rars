@@ -277,7 +277,12 @@ fn legacy_archive_comment_encryption_is_independent_of_member_passwords() {
         assert!(!output.members().next().unwrap().meta.is_encrypted);
         if let Archive::Rar15To40(archive) = output {
             assert_eq!(archive.main.has_encrypted_headers(), encrypted_headers);
-            assert!(archive.new_subs().next().unwrap().file.is_encrypted());
+            assert!(archive
+                .new_subs()
+                .find(|sub| sub.file.name != b"RARS")
+                .unwrap()
+                .file
+                .is_encrypted());
         } else {
             panic!("legacy output expected");
         }

@@ -57,6 +57,8 @@ mod parallel;
 mod parse_budget;
 #[cfg(any(feature = "write", feature = "recovery"))]
 mod pending_archive;
+#[cfg(feature = "write")]
+mod producer;
 #[cfg(any(feature = "write", feature = "recovery"))]
 mod progress;
 mod read_control;
@@ -3274,7 +3276,7 @@ mod tests {
         let archive = ArchiveReader::read(&bytes).unwrap();
         let raw = archive.as_rar15_40().unwrap();
         assert!(!raw.main.has_archive_comment());
-        let subblock = raw.new_subs().next().unwrap();
+        let subblock = raw.new_subs().find(|sub| sub.file.name == b"CMT").unwrap();
         assert_eq!(subblock.kind, rar15_40::NewSubKind::ArchiveComment);
         assert_eq!(subblock.file.name, b"CMT");
         assert_eq!(

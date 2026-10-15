@@ -245,7 +245,7 @@ impl Archive {
                         .then_some(26),
                     )
                     .solid(archive.main.is_solid())
-                    // Preflight accepts only CMT new-sub records, and at most one.
+                    // Preflight accepts one producer and at most one CMT record.
                     .archive_comment_password(
                         archive
                             .new_subs()
@@ -258,7 +258,7 @@ impl Archive {
                     .legacy_archive_comment_metadata(
                         archive
                             .new_subs()
-                            .next()
+                            .find(|sub| sub.kind == crate::rar15_40::NewSubKind::ArchiveComment)
                             .map(|sub| (sub.file.file_time, sub.file.host_os)),
                     ))
             }

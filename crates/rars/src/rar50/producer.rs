@@ -2,10 +2,8 @@
 
 use super::{Archive, FileHeader, FHFL_CRC32, HEAD_SERVICE, HFL_DATA};
 
-pub(crate) const NAME: &[u8] = b"RARS";
+pub(crate) use crate::producer::{DATA, NAME};
 pub(crate) const FLAGS: u64 = HFL_DATA | 0x0004; // Discard unknown blocks on update.
-pub(crate) const DATA: &[u8] =
-    concat!("rars/", env!("CARGO_PKG_VERSION"), "\nmarker-schema=1\n").as_bytes();
 
 /// Only a recognized, intact producer record may be replaced during a preserving
 /// rewrite. Unknown schemas and metadata still require an explicit lossy rewrite.
@@ -23,7 +21,7 @@ pub(crate) fn is_replaceable(service: &FileHeader, archive: &Archive) -> bool {
         || service.modification_time().is_some()
         || service.file_times.is_some()
         || service.data_crc32.is_none()
-        || service.unpacked_size > 128
+        || service.unpacked_size > crate::producer::MAX_DATA_LEN
         || service.block.data_size != Some(service.unpacked_size)
         || service.block.data_range.len() as u64 != service.unpacked_size
     {
@@ -33,12 +31,5 @@ pub(crate) fn is_replaceable(service: &FileHeader, archive: &Archive) -> bool {
     if service.write_to(archive, None, &mut data).is_err() {
         return false;
     }
-    data.strip_prefix(b"rars/")
-        .and_then(|data| data.strip_suffix(b"\nmarker-schema=1\n"))
-        .is_some_and(|version| {
-            !version.is_empty()
-                && version
-                    .iter()
-                    .all(|byte| byte.is_ascii_alphanumeric() || b".-+".contains(byte))
-        })
+    crate::producer::recognized(&data)
 }
