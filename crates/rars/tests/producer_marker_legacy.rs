@@ -115,19 +115,6 @@ fn legacy_producer_preserves_members_comments_and_format_requirement() {
 }
 
 #[test]
-fn rar14_remains_unmarked() {
-    let mut builder = Builder::new(ArchiveVersion::Rar14).store(true);
-    builder
-        .add_bytes(b"file".to_vec(), b"payload".to_vec(), None, None)
-        .unwrap();
-    assert!(!builder
-        .to_bytes()
-        .unwrap()
-        .windows(DATA.len())
-        .any(|part| part == DATA));
-}
-
-#[test]
 fn each_legacy_volume_has_a_producer() {
     for version in [
         ArchiveVersion::Rar15,

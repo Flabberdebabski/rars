@@ -972,17 +972,30 @@ fn write_main_header_with_flags(
     if features.solid {
         flags |= MHD_SOLID;
     }
+    let head_size = main_header_size(comment_extra.len())?;
     out.extend_from_slice(RAR13_SIGNATURE);
-    let head_size = MAIN_HEAD_SIZE as usize + comment_extra.len();
-    if head_size > u16::MAX as usize {
-        return Err(Error::InvalidArgument(
-            "RAR 1.3 main header comment extension is too large",
-        ));
-    }
-    out.extend_from_slice(&(head_size as u16).to_le_bytes());
+    out.extend_from_slice(&head_size.to_le_bytes());
     out.push(flags);
     out.extend_from_slice(&comment_extra);
+    producer::append(out);
     Ok(())
+}
+
+fn main_header_size(comment_len: usize) -> Result<u16> {
+    comment_len
+        .checked_add(MAIN_HEAD_SIZE as usize + producer::RECORD_LEN)
+        .and_then(|size| u16::try_from(size).ok())
+        .ok_or(Error::InvalidArgument(
+            "RAR 1.3 main header comment extension is too large",
+        ))
+}
+
+#[test]
+fn producer_main_header_size_bounds() {
+    let max_comment = u16::MAX as usize - MAIN_HEAD_SIZE as usize - producer::RECORD_LEN;
+    assert_eq!(main_header_size(max_comment).unwrap(), u16::MAX);
+    assert!(main_header_size(max_comment + 1).is_err());
+    assert!(main_header_size(usize::MAX).is_err());
 }
 
 struct FileEntryRecord<'a> {
@@ -2982,7 +2995,7 @@ mod tests {
         let valid = write_stored_archive_with_comment(
             &[],
             WriterOptions::default(),
-            Some(&comment[..64755]),
+            Some(&comment[..64700]),
         )
         .unwrap();
         assert_eq!(
@@ -2991,7 +3004,7 @@ mod tests {
                 .archive_comment()
                 .unwrap()
                 .unwrap(),
-            comment[..64755]
+            comment[..64700]
         );
         assert_eq!(
             encode_archive_comment(Some(&comment[..64760]))
@@ -3066,7 +3079,8 @@ mod tests {
         );
 
         let mut oversized_payload = bytes;
-        oversized_payload[7..11].copy_from_slice(&u32::MAX.to_le_bytes());
+        let file_start = u16::from_le_bytes([oversized_payload[4], oversized_payload[5]]) as usize;
+        oversized_payload[file_start..file_start + 4].copy_from_slice(&u32::MAX.to_le_bytes());
         std::fs::write(&path, &oversized_payload).unwrap();
         assert_eq!(
             Archive::parse_owned(oversized_payload).unwrap_err(),

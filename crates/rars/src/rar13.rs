@@ -1,6 +1,8 @@
 //! RAR 1.3/1.4 format parsing and sequential extraction.
 
 #[cfg(feature = "write")]
+mod producer;
+#[cfg(feature = "write")]
 pub(crate) mod write;
 #[cfg(feature = "write")]
 pub(crate) use write::{
@@ -712,7 +714,7 @@ impl Archive {
         };
         if self.main.flags & !(MHD_COMMENT | MHD_SOLID | MHD_PACK_COMMENT | MHD_ALWAYS_SET) != 0
             || (self.main.has_packed_comment() && !self.main.has_archive_comment())
-            || !exact_comment(&self.main.extra, self.main.has_archive_comment())
+            || !producer::replaceable_extra(&self.main.extra, self.main.has_archive_comment())
         {
             issues.push(
                 "RAR1.3/1.4 main metadata, volumes or authenticity records are unsupported".into(),

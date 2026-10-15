@@ -29,7 +29,8 @@ fn stored(version: ArchiveVersion, encrypted: bool, volumes: bool) -> Vec<Vec<u8
                 let range = archive.entries[0].packed_range.clone();
                 let len = range.len();
                 volume[range].copy_from_slice(&encrypted_data[position..position + len]);
-                volume[24] |= 0x04;
+                let file_start = usize::from(archive.main.head_size);
+                volume[file_start + 17] |= 0x04;
                 position += len;
             }
             assert_eq!(position, encrypted_data.len());
@@ -51,7 +52,8 @@ fn rar13_stored_members_reject_incorrect_declared_lengths_even_when_checksum_mat
             let password = encrypted.then_some(b"secret".as_slice());
             for declared in [0u32, 1, 255, 257] {
                 let mut malformed = original.clone();
-                malformed[11..15].copy_from_slice(&declared.to_le_bytes());
+                let file_start = usize::from(u16::from_le_bytes([malformed[4], malformed[5]]));
+                malformed[file_start + 4..file_start + 8].copy_from_slice(&declared.to_le_bytes());
                 let archive = ArchiveReader::read_owned(malformed).unwrap();
                 assert!(
                     archive.read_member_at(0, password).is_err(),
@@ -108,7 +110,8 @@ fn rar13_split_stored_members_verify_reassembled_length() {
                 vec![0; 256]
             );
             let last = bytes.last_mut().unwrap();
-            last[11..15].copy_from_slice(&1u32.to_le_bytes());
+            let file_start = usize::from(u16::from_le_bytes([last[4], last[5]]));
+            last[file_start + 4..file_start + 8].copy_from_slice(&1u32.to_le_bytes());
             let archives: Vec<_> = bytes
                 .into_iter()
                 .map(|bytes| ArchiveReader::read_owned(bytes).unwrap())
