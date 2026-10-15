@@ -1012,7 +1012,7 @@ impl Archive {
     /// The highest format requirement present in this container, not its creator release.
     #[cfg(feature = "write")]
     pub(crate) fn preservation_version(&self) -> ArchiveVersion {
-        // RARS is also supported by RAR 2.9 readers; it no longer implies 3.0.
+        // Producer records declare their own minimum unpacker version.
         if self.main.has_encrypted_headers()
             || self
                 .new_subs()
@@ -1020,14 +1020,12 @@ impl Archive {
         {
             ArchiveVersion::Rar30
         } else {
-            let producer_version = if self
+            let producer_version = self
                 .new_subs()
-                .any(|sub| sub.file.name == crate::producer::NAME)
-            {
-                29
-            } else {
-                15
-            };
+                .filter(|sub| sub.file.name == crate::producer::NAME)
+                .map(|sub| sub.file.unp_ver)
+                .max()
+                .unwrap_or(15);
             match self
                 .files()
                 .map(|file| file.unp_ver)
@@ -4685,7 +4683,12 @@ mod tests {
 
     #[test]
     fn preservation_preflight_reports_public_member_metadata_inconsistencies() {
-        let seed = preservation_seed(ArchiveVersion::Rar29);
+        let mut seed = preservation_seed(ArchiveVersion::Rar29);
+        // These mutations infer the archive requirement from member metadata;
+        // a producer with unpacker 29 would independently impose that minimum.
+        seed.blocks.retain(
+            |block| !matches!(block, Block::NewSub(sub) if sub.file.name == crate::producer::NAME),
+        );
         type Edit = fn(&mut FileHeader);
         let cases: &[(&str, Edit)] = &[
             ("requires unpacker 21", |f| f.unp_ver = 21),

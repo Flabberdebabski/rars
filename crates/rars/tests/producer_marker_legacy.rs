@@ -30,6 +30,7 @@ fn marker(archive: &Archive) {
 #[test]
 fn legacy_producer_preserves_members_comments_and_format_requirement() {
     for version in [
+        ArchiveVersion::Rar20,
         ArchiveVersion::Rar29,
         ArchiveVersion::Rar30,
         ArchiveVersion::Rar40,
@@ -58,6 +59,22 @@ fn legacy_producer_preserves_members_comments_and_format_requirement() {
                     };
                     let archive = ArchiveReader::read_owned(bytes).unwrap();
                     marker(archive.as_rar15_40().unwrap());
+                    let expected_unp_ver = if version == ArchiveVersion::Rar20 {
+                        20
+                    } else {
+                        29
+                    };
+                    assert_eq!(
+                        archive
+                            .as_rar15_40()
+                            .unwrap()
+                            .new_subs()
+                            .next()
+                            .unwrap()
+                            .file
+                            .unp_ver,
+                        expected_unp_ver
+                    );
                     assert_eq!(archive.members().count(), usize::from(!empty));
                     assert_eq!(archive.comment(None).unwrap(), comment);
                     archive.test(None).unwrap();
@@ -77,7 +94,12 @@ fn legacy_producer_preserves_members_comments_and_format_requirement() {
                     let parsed = Archive::parse(&rewritten).unwrap();
                     marker(&parsed);
                     assert_eq!(parsed.archive_comment().unwrap(), comment);
-                    if version == ArchiveVersion::Rar29 {
+                    if matches!(version, ArchiveVersion::Rar20 | ArchiveVersion::Rar29) {
+                        assert_eq!(parsed.files().next().unwrap().unp_ver, expected_unp_ver);
+                        assert_eq!(
+                            parsed.new_subs().next().unwrap().file.unp_ver,
+                            expected_unp_ver
+                        );
                         assert!(!parsed
                             .new_subs()
                             .any(|sub| sub.kind == NewSubKind::ArchiveComment));
@@ -90,11 +112,7 @@ fn legacy_producer_preserves_members_comments_and_format_requirement() {
 
 #[test]
 fn earlier_formats_remain_unmarked() {
-    for version in [
-        ArchiveVersion::Rar14,
-        ArchiveVersion::Rar15,
-        ArchiveVersion::Rar20,
-    ] {
+    for version in [ArchiveVersion::Rar14, ArchiveVersion::Rar15] {
         let mut builder = Builder::new(version).store(true);
         builder
             .add_bytes(b"file".to_vec(), b"payload".to_vec(), None, None)
@@ -110,6 +128,7 @@ fn earlier_formats_remain_unmarked() {
 #[test]
 fn each_legacy_volume_has_a_producer() {
     for version in [
+        ArchiveVersion::Rar20,
         ArchiveVersion::Rar29,
         ArchiveVersion::Rar30,
         ArchiveVersion::Rar40,
@@ -174,7 +193,11 @@ fn mutate_payload(mut bytes: Vec<u8>, change: impl FnOnce(&mut [u8])) -> Vec<u8>
 
 #[test]
 fn legacy_rewrite_replaces_known_producer_and_refuses_ambiguous_records() {
-    for version in [ArchiveVersion::Rar29, ArchiveVersion::Rar30] {
+    for version in [
+        ArchiveVersion::Rar20,
+        ArchiveVersion::Rar29,
+        ArchiveVersion::Rar30,
+    ] {
         let mut builder = Builder::new(version).store(true);
         builder
             .add_bytes(b"file".to_vec(), b"payload".to_vec(), None, None)
@@ -215,7 +238,7 @@ fn legacy_rewrite_replaces_known_producer_and_refuses_ambiguous_records() {
             .unwrap()
             .preserving_builder(None)
             .is_err());
-        for change in 0..7 {
+        for change in 0..8 {
             let mut archive = Archive::parse(&bytes).unwrap();
             match change {
                 0 => archive.blocks.insert(0, archive.blocks[0].clone()),
@@ -229,7 +252,8 @@ fn legacy_rewrite_replaces_known_producer_and_refuses_ambiguous_records() {
                         3 => sub.file.unp_size = 129,
                         4 => sub.file.block.flags |= 8,
                         5 => sub.file.file_crc ^= 1,
-                        _ => sub.kind = NewSubKind::ArchiveComment,
+                        6 => sub.kind = NewSubKind::ArchiveComment,
+                        _ => sub.file.unp_ver = 26,
                     }
                 }
             }

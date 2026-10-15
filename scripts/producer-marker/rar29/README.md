@@ -17,7 +17,8 @@ bounded, CRC-checked schema validation. The marker requires at least `rar29`,
 not `rar30`; a RAR 3 comment or encrypted headers still requires `rar30`.
 Otherwise identical RAR 2.9/3/4 archives cannot reveal the original target
 selection. Rewriting uses the lowest supported format implied by their records.
-RAR 1.x and 2.0 output remains unchanged.
+The subsequent [RAR 2.0 backfit](../rar20/README.md) uses unpacker version 20
+for its producer; RAR 1.x output remains unmarked.
 
 ## Evidence
 

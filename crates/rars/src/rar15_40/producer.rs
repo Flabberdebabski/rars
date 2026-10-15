@@ -8,7 +8,7 @@ pub(super) fn is_replaceable(file: &FileHeader, archive: &Archive) -> bool {
         || file.block.flags != LONG_BLOCK | 0x4000
         || file.block.head_size != 36
         || file.block.add_size != Some(file.pack_size)
-        || file.unp_ver != 29
+        || !matches!(file.unp_ver, 20 | 29)
         || file.method != 0x30
         || file.host_os != 0
         || file.attr != 0

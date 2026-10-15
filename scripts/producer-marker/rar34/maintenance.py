@@ -38,7 +38,7 @@ def blocks(data):
                 assert flags == 0xc000 and size == 36
                 assert data[offset + 15] == 0  # host OS
                 assert data[offset + 20:offset + 24] == bytes(4)  # timestamp
-                assert data[offset + 24:offset + 26] == bytes([29, 0x30])
+                assert data[offset + 24] in (20, 29) and data[offset + 25] == 0x30
                 assert data[offset + 28:offset + 32] == bytes(4)  # attributes
                 assert struct.unpack_from("<I", data, offset + 11)[0] == length
                 assert struct.unpack_from("<I", data, offset + 16)[0] == zlib.crc32(data[end:end + length])

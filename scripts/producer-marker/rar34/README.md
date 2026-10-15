@@ -7,7 +7,8 @@ duplicated, misplaced or damaged records are refused. The subsequent
 the marker itself only requires RAR 2.9; rewrites now infer that minimum unless
 comments or encrypted headers require RAR 3. RAR 5/7 retain their existing wire
 representation and now share the producer payload definition. RAR 2.9 is now
-also marked; earlier formats remain unmarked.
+also marked; the subsequent [RAR 2.0 backfit](../rar20/README.md) uses unpacker
+version 20 for its producer. RAR 1.x output remains unmarked.
 
 `prototype.patch` records the original investigation against revision `a5e7723`.
 `results.json` preserves that historical evidence. Production writer comparisons
