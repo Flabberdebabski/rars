@@ -20,7 +20,11 @@ def blocks(data):
         crc, kind, flags, size = struct.unpack_from("<HBHH", data, offset)
         end = offset + size
         assert size >= 7 and end <= len(data)
-        assert zlib.crc32(data[offset + 2:end]) & 0xffff == crc
+        # Old-style comments include their payload in HEAD_SIZE, but only the
+        # fixed 13-byte header contributes to HEAD_CRC.
+        crc_end = offset + 13 if kind == 0x75 else end
+        assert crc_end <= end
+        assert zlib.crc32(data[offset + 2:crc_end]) & 0xffff == crc
         length = struct.unpack_from("<I", data, offset + 7)[0] if flags & 0x8000 else 0
         name = None
         if kind in (0x74, 0x7a):

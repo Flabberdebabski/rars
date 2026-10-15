@@ -1012,14 +1012,29 @@ impl Archive {
     /// The highest format requirement present in this container, not its creator release.
     #[cfg(feature = "write")]
     pub(crate) fn preservation_version(&self) -> ArchiveVersion {
+        // RARS is also supported by RAR 2.9 readers; it no longer implies 3.0.
         if self.main.has_encrypted_headers()
-            || self.new_subs().any(|sub| {
-                sub.kind == NewSubKind::ArchiveComment || sub.file.name == crate::producer::NAME
-            })
+            || self
+                .new_subs()
+                .any(|sub| sub.kind == NewSubKind::ArchiveComment)
         {
             ArchiveVersion::Rar30
         } else {
-            match self.files().map(|file| file.unp_ver).max().unwrap_or(15) {
+            let producer_version = if self
+                .new_subs()
+                .any(|sub| sub.file.name == crate::producer::NAME)
+            {
+                29
+            } else {
+                15
+            };
+            match self
+                .files()
+                .map(|file| file.unp_ver)
+                .max()
+                .unwrap_or(15)
+                .max(producer_version)
+            {
                 29.. => ArchiveVersion::Rar29,
                 20..=28 => ArchiveVersion::Rar20,
                 _ => ArchiveVersion::Rar15,

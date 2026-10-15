@@ -6,8 +6,9 @@ use rars::{ArchiveReader, ArchiveVersion, Builder};
 const DATA: &[u8] = concat!("rars/", env!("CARGO_PKG_VERSION"), "\nmarker-schema=1\n").as_bytes();
 
 fn marker(archive: &Archive) {
-    let Block::NewSub(sub) = &archive.blocks[0] else {
-        panic!("producer must precede comments and files");
+    let index = usize::from(matches!(archive.blocks.first(), Some(Block::Comment(_))));
+    let Block::NewSub(sub) = &archive.blocks[index] else {
+        panic!("producer must follow any old-style comment and precede files");
     };
     assert_eq!(sub.file.name, b"RARS");
     assert_eq!(sub.file.block.flags, 0xc000);
@@ -28,7 +29,11 @@ fn marker(archive: &Archive) {
 
 #[test]
 fn legacy_producer_preserves_members_comments_and_format_requirement() {
-    for version in [ArchiveVersion::Rar30, ArchiveVersion::Rar40] {
+    for version in [
+        ArchiveVersion::Rar29,
+        ArchiveVersion::Rar30,
+        ArchiveVersion::Rar40,
+    ] {
         for store in [false, true] {
             for empty in [false, true] {
                 for comment in [None, Some(b"user comment".to_vec())] {
@@ -61,12 +66,22 @@ fn legacy_producer_preserves_members_comments_and_format_requirement() {
                         assert!(archive.preserving_builder(None).is_err());
                         continue;
                     }
-                    let mut rewrite = archive.preserving_builder(None).unwrap().comment(comment);
+                    let mut rewrite = archive
+                        .preserving_builder(None)
+                        .unwrap()
+                        .comment(comment.clone());
                     rewrite
                         .add_bytes(b"new".to_vec(), b"new data".to_vec(), None, None)
                         .unwrap();
                     let rewritten = rewrite.to_bytes().unwrap();
-                    marker(&Archive::parse(&rewritten).unwrap());
+                    let parsed = Archive::parse(&rewritten).unwrap();
+                    marker(&parsed);
+                    assert_eq!(parsed.archive_comment().unwrap(), comment);
+                    if version == ArchiveVersion::Rar29 {
+                        assert!(!parsed
+                            .new_subs()
+                            .any(|sub| sub.kind == NewSubKind::ArchiveComment));
+                    }
                 }
             }
         }
@@ -79,7 +94,6 @@ fn earlier_formats_remain_unmarked() {
         ArchiveVersion::Rar14,
         ArchiveVersion::Rar15,
         ArchiveVersion::Rar20,
-        ArchiveVersion::Rar29,
     ] {
         let mut builder = Builder::new(version).store(true);
         builder
@@ -95,7 +109,11 @@ fn earlier_formats_remain_unmarked() {
 
 #[test]
 fn each_legacy_volume_has_a_producer() {
-    for version in [ArchiveVersion::Rar30, ArchiveVersion::Rar40] {
+    for version in [
+        ArchiveVersion::Rar29,
+        ArchiveVersion::Rar30,
+        ArchiveVersion::Rar40,
+    ] {
         for store in [false, true] {
             let mut builder = Builder::new(version).store(store).volume_size(Some(16));
             builder
@@ -156,69 +174,71 @@ fn mutate_payload(mut bytes: Vec<u8>, change: impl FnOnce(&mut [u8])) -> Vec<u8>
 
 #[test]
 fn legacy_rewrite_replaces_known_producer_and_refuses_ambiguous_records() {
-    let mut builder = Builder::new(ArchiveVersion::Rar30).store(true);
-    builder
-        .add_bytes(b"file".to_vec(), b"payload".to_vec(), None, None)
-        .unwrap();
-    let bytes = builder.to_bytes().unwrap();
-    let old = mutate_payload(bytes.clone(), |data| {
-        for byte in &mut data[5..5 + env!("CARGO_PKG_VERSION").len()] {
-            if byte.is_ascii_digit() {
-                *byte = b'0';
-            }
-        }
-    });
-    let archive = ArchiveReader::read_owned(old).unwrap();
-    let mut rewrite = archive.preserving_builder(None).unwrap();
-    rewrite
-        .add_bytes(b"new".to_vec(), b"new data".to_vec(), None, None)
-        .unwrap();
-    marker(&Archive::parse(&rewrite.to_bytes().unwrap()).unwrap());
-    let unknown = mutate_payload(bytes.clone(), |data| {
-        let end = data.len();
-        data[end - 2] = b'2';
-    });
-    assert!(ArchiveReader::read_owned(unknown)
-        .unwrap()
-        .preserving_builder(None)
-        .is_err());
-    let mut damaged = bytes.clone();
-    let offset = Archive::parse(&bytes)
-        .unwrap()
-        .new_subs()
-        .next()
-        .unwrap()
-        .file
-        .packed_range
-        .start;
-    damaged[offset] ^= 1;
-    assert!(ArchiveReader::read_owned(damaged)
-        .unwrap()
-        .preserving_builder(None)
-        .is_err());
-    for change in 0..7 {
-        let mut archive = Archive::parse(&bytes).unwrap();
-        match change {
-            0 => archive.blocks.insert(0, archive.blocks[0].clone()),
-            1 => archive.blocks.swap(0, 1),
-            _ => {
-                let Block::NewSub(sub) = &mut archive.blocks[0] else {
-                    unreachable!()
-                };
-                match change {
-                    2 => sub.file.block.head_size += 1,
-                    3 => sub.file.unp_size = 129,
-                    4 => sub.file.block.flags |= 8,
-                    5 => sub.file.file_crc ^= 1,
-                    _ => sub.kind = NewSubKind::ArchiveComment,
+    for version in [ArchiveVersion::Rar29, ArchiveVersion::Rar30] {
+        let mut builder = Builder::new(version).store(true);
+        builder
+            .add_bytes(b"file".to_vec(), b"payload".to_vec(), None, None)
+            .unwrap();
+        let bytes = builder.to_bytes().unwrap();
+        let old = mutate_payload(bytes.clone(), |data| {
+            for byte in &mut data[5..5 + env!("CARGO_PKG_VERSION").len()] {
+                if byte.is_ascii_digit() {
+                    *byte = b'0';
                 }
             }
+        });
+        let archive = ArchiveReader::read_owned(old).unwrap();
+        let mut rewrite = archive.preserving_builder(None).unwrap();
+        rewrite
+            .add_bytes(b"new".to_vec(), b"new data".to_vec(), None, None)
+            .unwrap();
+        marker(&Archive::parse(&rewrite.to_bytes().unwrap()).unwrap());
+        let unknown = mutate_payload(bytes.clone(), |data| {
+            let end = data.len();
+            data[end - 2] = b'2';
+        });
+        assert!(ArchiveReader::read_owned(unknown)
+            .unwrap()
+            .preserving_builder(None)
+            .is_err());
+        let mut damaged = bytes.clone();
+        let offset = Archive::parse(&bytes)
+            .unwrap()
+            .new_subs()
+            .next()
+            .unwrap()
+            .file
+            .packed_range
+            .start;
+        damaged[offset] ^= 1;
+        assert!(ArchiveReader::read_owned(damaged)
+            .unwrap()
+            .preserving_builder(None)
+            .is_err());
+        for change in 0..7 {
+            let mut archive = Archive::parse(&bytes).unwrap();
+            match change {
+                0 => archive.blocks.insert(0, archive.blocks[0].clone()),
+                1 => archive.blocks.swap(0, 1),
+                _ => {
+                    let Block::NewSub(sub) = &mut archive.blocks[0] else {
+                        unreachable!()
+                    };
+                    match change {
+                        2 => sub.file.block.head_size += 1,
+                        3 => sub.file.unp_size = 129,
+                        4 => sub.file.block.flags |= 8,
+                        5 => sub.file.file_crc ^= 1,
+                        _ => sub.kind = NewSubKind::ArchiveComment,
+                    }
+                }
+            }
+            assert!(
+                rars::Archive::Rar15To40(archive)
+                    .preserving_builder(None)
+                    .is_err(),
+                "mutation {change}"
+            );
         }
-        assert!(
-            rars::Archive::Rar15To40(archive)
-                .preserving_builder(None)
-                .is_err(),
-            "mutation {change}"
-        );
     }
 }

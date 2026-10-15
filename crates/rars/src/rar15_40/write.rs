@@ -591,7 +591,9 @@ fn write_members_to(
     let mut head = Vec::new();
     write_main_header(&mut head, main_flags);
     output.write_all(&head)?;
-    write_producer(output, options.target, header_password, progress.reporter())?;
+    if !uses_old_style_archive_comment(options.target) {
+        write_producer(output, options.target, header_password, progress.reporter())?;
+    }
     write_archive_comment(
         output,
         archive_comment,
@@ -599,6 +601,11 @@ fn write_members_to(
         header_password,
         archive_comment_password,
     )?;
+    // Old-style comments must immediately follow the main header. Readers look
+    // there directly when MHD_COMMENT is set, rather than scanning subblocks.
+    if uses_old_style_archive_comment(options.target) {
+        write_producer(output, options.target, header_password, progress.reporter())?;
+    }
 
     // Solid members share one encoder, so they are coded in order. Independent
     // ones are coded a window at a time and written as each window lands.
@@ -2536,7 +2543,10 @@ fn write_producer(
     progress: Option<ProgressReporter<'_>>,
 ) -> Result<()> {
     crate::write_progress::check_cancelled(progress)?;
-    if !matches!(target, ArchiveVersion::Rar30 | ArchiveVersion::Rar40) {
+    if !matches!(
+        target,
+        ArchiveVersion::Rar29 | ArchiveVersion::Rar30 | ArchiveVersion::Rar40
+    ) {
         return Ok(());
     }
     let data = crate::producer::DATA;

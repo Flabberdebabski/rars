@@ -2,10 +2,12 @@
 
 The `rar30` and `rar40` writers now emit the named `RARS` new-subblock described
 below. Preserving rewrites validate and replace recognized records; unknown,
-duplicated, misplaced or damaged records are refused. The marker also preserves
-the RAR 3 format requirement when rewriting archives without a comment or
-encrypted headers. RAR 5/7 retain their existing wire representation and now
-share the producer payload definition. Earlier formats remain unmarked.
+duplicated, misplaced or damaged records are refused. The subsequent
+[RAR 2.9 investigation](../rar29/README.md) established that
+the marker itself only requires RAR 2.9; rewrites now infer that minimum unless
+comments or encrypted headers require RAR 3. RAR 5/7 retain their existing wire
+representation and now share the producer payload definition. RAR 2.9 is now
+also marked; earlier formats remain unmarked.
 
 `prototype.patch` records the original investigation against revision `a5e7723`.
 `results.json` preserves that historical evidence. Production writer comparisons
