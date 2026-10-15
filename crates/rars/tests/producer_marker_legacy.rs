@@ -30,6 +30,7 @@ fn marker(archive: &Archive) {
 #[test]
 fn legacy_producer_preserves_members_comments_and_format_requirement() {
     for version in [
+        ArchiveVersion::Rar15,
         ArchiveVersion::Rar20,
         ArchiveVersion::Rar29,
         ArchiveVersion::Rar30,
@@ -59,10 +60,10 @@ fn legacy_producer_preserves_members_comments_and_format_requirement() {
                     };
                     let archive = ArchiveReader::read_owned(bytes).unwrap();
                     marker(archive.as_rar15_40().unwrap());
-                    let expected_unp_ver = if version == ArchiveVersion::Rar20 {
-                        20
-                    } else {
-                        29
+                    let expected_unp_ver = match version {
+                        ArchiveVersion::Rar15 => 15,
+                        ArchiveVersion::Rar20 => 20,
+                        _ => 29,
                     };
                     assert_eq!(
                         archive
@@ -94,7 +95,10 @@ fn legacy_producer_preserves_members_comments_and_format_requirement() {
                     let parsed = Archive::parse(&rewritten).unwrap();
                     marker(&parsed);
                     assert_eq!(parsed.archive_comment().unwrap(), comment);
-                    if matches!(version, ArchiveVersion::Rar20 | ArchiveVersion::Rar29) {
+                    if matches!(
+                        version,
+                        ArchiveVersion::Rar15 | ArchiveVersion::Rar20 | ArchiveVersion::Rar29
+                    ) {
                         assert_eq!(parsed.files().next().unwrap().unp_ver, expected_unp_ver);
                         assert_eq!(
                             parsed.new_subs().next().unwrap().file.unp_ver,
@@ -111,23 +115,22 @@ fn legacy_producer_preserves_members_comments_and_format_requirement() {
 }
 
 #[test]
-fn earlier_formats_remain_unmarked() {
-    for version in [ArchiveVersion::Rar14, ArchiveVersion::Rar15] {
-        let mut builder = Builder::new(version).store(true);
-        builder
-            .add_bytes(b"file".to_vec(), b"payload".to_vec(), None, None)
-            .unwrap();
-        assert!(!builder
-            .to_bytes()
-            .unwrap()
-            .windows(DATA.len())
-            .any(|part| part == DATA));
-    }
+fn rar14_remains_unmarked() {
+    let mut builder = Builder::new(ArchiveVersion::Rar14).store(true);
+    builder
+        .add_bytes(b"file".to_vec(), b"payload".to_vec(), None, None)
+        .unwrap();
+    assert!(!builder
+        .to_bytes()
+        .unwrap()
+        .windows(DATA.len())
+        .any(|part| part == DATA));
 }
 
 #[test]
 fn each_legacy_volume_has_a_producer() {
     for version in [
+        ArchiveVersion::Rar15,
         ArchiveVersion::Rar20,
         ArchiveVersion::Rar29,
         ArchiveVersion::Rar30,
@@ -194,6 +197,7 @@ fn mutate_payload(mut bytes: Vec<u8>, change: impl FnOnce(&mut [u8])) -> Vec<u8>
 #[test]
 fn legacy_rewrite_replaces_known_producer_and_refuses_ambiguous_records() {
     for version in [
+        ArchiveVersion::Rar15,
         ArchiveVersion::Rar20,
         ArchiveVersion::Rar29,
         ArchiveVersion::Rar30,

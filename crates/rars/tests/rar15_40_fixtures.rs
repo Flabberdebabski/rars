@@ -5440,7 +5440,15 @@ fn extracts_rars_generated_rar15_comments_and_encryption_oracles() {
         collect_extract(&comment_archive).unwrap()[0].data,
         RARS_GENERATED_PAYLOAD
     );
-    assert_eq!(comment_bytes, rars_generated_comments_archive());
+    let mut generated = rars_generated_comments_archive();
+    let generated_archive = Archive::parse(&generated).unwrap();
+    let producer = generated_archive.new_subs().next().unwrap();
+    assert_eq!(producer.file.name, b"RARS");
+    assert_eq!(producer.file.unp_ver, 15);
+    // Keep the old unmarked fixture as a reader oracle. Apart from the new
+    // producer record, the archive and file comment bytes must stay identical.
+    generated.drain(producer.file.block.offset..producer.file.packed_range.end);
+    assert_eq!(comment_bytes, generated);
 
     let encrypted_bytes = std::fs::read(fixture("rars_generated/encrypted.rar")).unwrap();
     let encrypted_archive = Archive::parse(&encrypted_bytes).unwrap();

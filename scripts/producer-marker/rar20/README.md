@@ -11,7 +11,8 @@ Strict recognition accepts only unpacker versions 20 and 29, alongside the
 existing exact framing, bounded payload, CRC and schema checks. Preserving
 rewrites infer the minimum version from both members and the producer, so a
 RAR 2.0 archive remains RAR 2.0. A newer producer record can still impose a
-higher minimum. RAR 1.x output remains unmarked.
+higher minimum. RAR 1.5 now uses unpacker version 15; see the
+[RAR 1.5 report](../rar15/README.md). RAR 1.4 output remains unmarked.
 
 ## Compatibility evidence
 

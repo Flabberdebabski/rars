@@ -18,7 +18,8 @@ not `rar30`; a RAR 3 comment or encrypted headers still requires `rar30`.
 Otherwise identical RAR 2.9/3/4 archives cannot reveal the original target
 selection. Rewriting uses the lowest supported format implied by their records.
 The subsequent [RAR 2.0 backfit](../rar20/README.md) uses unpacker version 20
-for its producer; RAR 1.x output remains unmarked.
+for its producer; RAR 1.5 now uses unpacker version 15; see the
+[RAR 1.5 report](../rar15/README.md). RAR 1.4 output remains unmarked.
 
 ## Evidence
 

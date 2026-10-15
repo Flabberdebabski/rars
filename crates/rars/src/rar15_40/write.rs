@@ -2545,7 +2545,8 @@ fn write_producer(
     crate::write_progress::check_cancelled(progress)?;
     if !matches!(
         target,
-        ArchiveVersion::Rar20
+        ArchiveVersion::Rar15
+            | ArchiveVersion::Rar20
             | ArchiveVersion::Rar29
             | ArchiveVersion::Rar30
             | ArchiveVersion::Rar40
