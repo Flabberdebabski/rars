@@ -1435,9 +1435,11 @@ impl<B: Budget> StreamingOutput<B> {
 /// `MAX_STREAMED_FILTER_LENGTH` long, at most `MAX_STREAMED_FILTERS` held at
 /// once; anything else ends streaming with `StreamDecodeError::FilteredMember`.
 struct FilterStage<B: Budget = Allowance> {
-    /// Accepted and not yet applied, in output order.
+    /// Accepted filters in output order; those from `applied` on are pending.
     filters: Buffer<PendingFilter, B>,
-    /// Bytes from the next filter's start up to `position`.
+    /// How many filters at the front of `filters` have been applied.
+    applied: usize,
+    /// Bytes from the next filter's start up to `position`, never past its end.
     held: Buffer<u8, B>,
     /// Output position of the next byte to arrive.
     position: usize,
@@ -1450,6 +1452,7 @@ impl<B: Budget> FilterStage<B> {
     fn new(allowance: &B) -> Self {
         Self {
             filters: Buffer::new(allowance),
+            applied: 0,
             held: Buffer::new(allowance),
             position: 0,
             filtered_to: 0,
@@ -1461,7 +1464,7 @@ impl<B: Budget> FilterStage<B> {
     fn hold<E>(&mut self, filter: PendingFilter) -> std::result::Result<(), StreamDecodeError<E>> {
         if filter.start < self.filtered_to
             || filter.length > MAX_STREAMED_FILTER_LENGTH
-            || self.filters.len() >= MAX_STREAMED_FILTERS
+            || self.filters.len() - self.applied >= MAX_STREAMED_FILTERS
         {
             return Err(StreamDecodeError::FilteredMember);
         }
@@ -1475,31 +1478,46 @@ impl<B: Budget> FilterStage<B> {
         chunk: DecodedChunk<'_>,
         sink: &mut impl FnMut(DecodedChunk<'_>) -> std::result::Result<(), E>,
     ) -> std::result::Result<(), StreamDecodeError<E>> {
-        let Some(next) = self.filters.first() else {
-            self.position += chunk_len(chunk);
-            return sink(chunk).map_err(StreamDecodeError::Sink);
-        };
         let mut chunk = chunk;
-        if self.held.is_empty() {
-            let direct = (next.start - self.position).min(chunk_len(chunk));
-            if direct != 0 {
+        loop {
+            let Some(&next) = self.next() else {
+                self.position += chunk_len(chunk);
+                return sink(chunk).map_err(StreamDecodeError::Sink);
+            };
+            let len = chunk_len(chunk);
+            if len == 0 {
+                return self.release(sink);
+            }
+            // Bytes before the next filter pass straight through, and so
+            // does everything once the filters are done.
+            if self.position < next.start {
+                let direct = (next.start - self.position).min(len);
                 let (head, tail) = split_chunk(chunk, direct);
                 sink(head).map_err(StreamDecodeError::Sink)?;
                 self.position += direct;
                 chunk = tail;
+                continue;
             }
-        }
-        match chunk {
-            DecodedChunk::Bytes(bytes) => self
-                .held
-                .extend_from_slice(bytes)
-                .map_err(|error| StreamDecodeError::Decode(error.into()))?,
-            DecodedChunk::Repeated { byte, len } => {
-                self.held.resize(self.held.len() + len, byte)?;
+            // Only the bytes the filter covers are held.
+            let covered = (next.start + next.length - self.position).min(len);
+            let (head, tail) = split_chunk(chunk, covered);
+            match head {
+                DecodedChunk::Bytes(bytes) => self
+                    .held
+                    .extend_from_slice(bytes)
+                    .map_err(|error| StreamDecodeError::Decode(error.into()))?,
+                DecodedChunk::Repeated { byte, len } => {
+                    self.held.resize(self.held.len() + len, byte)?;
+                }
             }
+            self.position += covered;
+            chunk = tail;
+            self.release(sink)?;
         }
-        self.position += chunk_len(chunk);
-        self.release(sink)
+    }
+
+    fn next(&self) -> Option<&PendingFilter> {
+        self.filters.get(self.applied)
     }
 
     /// Applies every filter whose range is complete, in order, and passes on
@@ -1508,7 +1526,7 @@ impl<B: Budget> FilterStage<B> {
         &mut self,
         sink: &mut impl FnMut(DecodedChunk<'_>) -> std::result::Result<(), E>,
     ) -> std::result::Result<(), StreamDecodeError<E>> {
-        while let Some(&filter) = self.filters.first() {
+        while let Some(&filter) = self.next() {
             if filter.start + filter.length > self.position {
                 break;
             }
@@ -1521,10 +1539,15 @@ impl<B: Budget> FilterStage<B> {
                 &self.control,
                 &allowance,
             )?;
-            self.filters.remove(0);
+            // Drop applied filters in batches, so draining a long queue
+            // moves each descriptor a bounded number of times.
+            self.applied += 1;
+            if self.applied * 2 >= self.filters.len() {
+                self.filters.discard_prefix(self.applied);
+                self.applied = 0;
+            }
             let to = self
-                .filters
-                .first()
+                .next()
                 .map_or(self.position, |next| next.start.min(self.position));
             let count = to - held_start;
             if count != 0 {
@@ -1537,7 +1560,7 @@ impl<B: Budget> FilterStage<B> {
 
     /// Every byte has arrived: each filter has been applied and released.
     fn finish<E>(&self) -> std::result::Result<(), StreamDecodeError<E>> {
-        if self.filters.is_empty() && self.held.is_empty() {
+        if self.next().is_none() && self.held.is_empty() {
             Ok(())
         } else {
             Err(Error::InvalidData("RAR 5 filter range exceeds output").into())

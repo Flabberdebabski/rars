@@ -5953,3 +5953,93 @@ fn control_only_block(symbol: usize) -> Vec<u8> {
     let payload_bits = writer.bit_pos;
     encode_compressed_block(&writer.finish(), payload_bits, true, true).unwrap()
 }
+
+#[test]
+fn filter_stage_passes_on_what_follows_a_filter_as_it_arrived() {
+    // The run after the filter is larger than the workspace may hold.
+    let mut stage = FilterStage::new(&Allowance::limited(64 * 1024));
+    stage
+        .hold::<std::convert::Infallible>(pending(FilterType::Delta, 0, 9))
+        .unwrap();
+    let mut chunks = Vec::new();
+    let mut sink = |chunk: DecodedChunk<'_>| {
+        chunks.push(match chunk {
+            DecodedChunk::Bytes(bytes) => format!("bytes {}", bytes.len()),
+            DecodedChunk::Repeated { len, .. } => format!("repeated {len}"),
+        });
+        Ok::<(), std::convert::Infallible>(())
+    };
+
+    stage.emit(DecodedChunk::Bytes(&[1; 6]), &mut sink).unwrap();
+    stage
+        .emit(
+            DecodedChunk::Repeated {
+                byte: 0,
+                len: 1 << 20,
+            },
+            &mut sink,
+        )
+        .unwrap();
+    stage.finish::<std::convert::Infallible>().unwrap();
+
+    assert_eq!(
+        chunks,
+        ["bytes 9".to_string(), format!("repeated {}", (1 << 20) - 3)]
+    );
+}
+
+#[test]
+fn filter_stage_drains_a_full_queue_of_filters_in_order() {
+    let data: Vec<u8> = (0..MAX_STREAMED_FILTERS * 16)
+        .map(|i| (i * 7 % 253) as u8)
+        .collect();
+    let filters: Vec<_> = (0..MAX_STREAMED_FILTERS)
+        .map(|i| pending(FilterType::Delta, i * 16 + 2, 12))
+        .collect();
+    let mut expected = data.clone();
+    apply_filters_with_control(
+        &mut expected,
+        &filters,
+        &crate::read_control::ReadControl::default(),
+    )
+    .unwrap();
+    let mut stage = FilterStage::new(&Allowance::default());
+    for &filter in &filters {
+        stage.hold::<std::convert::Infallible>(filter).unwrap();
+    }
+    let mut output = Vec::new();
+    let mut sink = |chunk: DecodedChunk<'_>| {
+        match chunk {
+            DecodedChunk::Bytes(bytes) => output.extend_from_slice(bytes),
+            DecodedChunk::Repeated { byte, len } => output.extend(std::iter::repeat_n(byte, len)),
+        }
+        Ok::<(), std::convert::Infallible>(())
+    };
+
+    for piece in data.chunks(1_000) {
+        stage.emit(DecodedChunk::Bytes(piece), &mut sink).unwrap();
+    }
+    stage.finish::<std::convert::Infallible>().unwrap();
+
+    assert!(output == expected, "the staged bytes differ");
+}
+
+#[test]
+fn filter_stage_frees_a_place_in_a_full_queue_once_a_filter_is_applied() {
+    let mut stage = FilterStage::new(&Allowance::default());
+    for i in 0..MAX_STREAMED_FILTERS {
+        stage
+            .hold::<std::convert::Infallible>(pending(FilterType::E8, i * 16, 8))
+            .unwrap();
+    }
+
+    stage
+        .emit(DecodedChunk::Bytes(&[0; 16]), &mut |_: DecodedChunk<'_>| {
+            Ok::<(), std::convert::Infallible>(())
+        })
+        .unwrap();
+
+    stage
+        .hold::<std::convert::Infallible>(pending(FilterType::E8, MAX_STREAMED_FILTERS * 16, 8))
+        .unwrap();
+}
