@@ -274,22 +274,14 @@ fn independent_history_public_stream_and_scratch_fallbacks_keep_existing_results
             let expected = extract(&archive, false, options);
             let actual = extract(&archive, true, options);
             assert_eq!(actual, expected);
-            if filter.is_some() && !use_scratch {
-                assert!(actual
-                    .0
-                    .as_ref()
-                    .unwrap_err()
-                    .contains("Rar50BufferedDecodeLimitExceeded"));
-            } else {
-                assert!(actual.0.is_ok());
-                assert_eq!(
-                    actual.1,
-                    [
-                        (b"first".to_vec(), data.clone()),
-                        (b"second".to_vec(), data.clone())
-                    ]
-                );
-            }
+            assert!(actual.0.is_ok());
+            assert_eq!(
+                actual.1,
+                [
+                    (b"first".to_vec(), data.clone()),
+                    (b"second".to_vec(), data.clone())
+                ]
+            );
             assert_eq!(std::fs::read_dir(&*dir).unwrap().count(), 0);
         }
     }

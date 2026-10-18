@@ -31,6 +31,14 @@ pub const LENGTH_TABLE_SIZE: usize = 44;
 const DEFAULT_DICTIONARY_SIZE: usize = 4 * 1024 * 1024;
 const MAX_INITIAL_OUTPUT_CAPACITY: usize = 1024 * 1024;
 const STREAM_FLUSH_THRESHOLD: usize = 64 * 1024;
+/// The longest filter the streaming decoder holds back to apply in place:
+/// unrar's `MAX_FILTER_BLOCK_SIZE`. A longer one ends streaming with
+/// `StreamDecodeError::FilteredMember`, leaving the member to a caller that
+/// can buffer it or decode it through scratch.
+const MAX_STREAMED_FILTER_LENGTH: usize = 0x40_0000;
+/// The most filters the streaming decoder holds at once: unrar's
+/// `MAX_UNPACK_FILTERS`. More also end streaming with `FilteredMember`.
+const MAX_STREAMED_FILTERS: usize = 8192;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompressedBlock {
@@ -955,6 +963,7 @@ impl<B: Budget> ReaderState<B> {
             dictionary_size,
             history_limit,
         )?;
+        output.stage.control = self.read_control.clone();
 
         loop {
             let block = read_compressed_block_with_allowance(input, &output.history.allowance())?;
@@ -986,9 +995,6 @@ impl<B: Budget> ReaderState<B> {
                 match symbol {
                     0..=255 => output.push(symbol as u8, &mut sink)?,
                     256 => {
-                        let Some(filters) = filters.as_mut() else {
-                            return Err(StreamDecodeError::FilteredMember);
-                        };
                         let filter = read_filter(&mut bits, output.written())?;
                         if filter
                             .start
@@ -999,7 +1005,10 @@ impl<B: Budget> ReaderState<B> {
                                 Error::InvalidData("RAR 5 filter range exceeds output").into()
                             );
                         }
-                        filters(filter).map_err(StreamDecodeError::Sink)?;
+                        match filters.as_mut() {
+                            Some(filters) => filters(filter).map_err(StreamDecodeError::Sink)?,
+                            None => output.stage.hold(filter)?,
+                        }
                     }
                     257 => {
                         if self.last_length != 0 {
@@ -1182,6 +1191,7 @@ fn reader_history_capacity(current: usize, required: usize, limit: usize) -> usi
 struct StreamingOutput<B: Budget = Allowance> {
     history: super::workspace::Deque<u8, B>,
     pending: Buffer<u8, B>,
+    stage: FilterStage<B>,
     written: usize,
     output_limit: usize,
     dictionary_size: usize,
@@ -1204,6 +1214,7 @@ impl<B: Budget> StreamingOutput<B> {
             all_zero: history.iter().all(|&byte| byte == 0),
             history: super::workspace::Deque::from_buffer(history),
             pending: Buffer::with_capacity(STREAM_FLUSH_THRESHOLD, &allowance)?,
+            stage: FilterStage::new(&allowance),
             written: 0,
             output_limit,
             dictionary_size,
@@ -1281,11 +1292,13 @@ impl<B: Budget> StreamingOutput<B> {
         // distance. Either retained history exists, or flushing the pending
         // zero literals retains at least one byte (the dictionary is nonzero).
         debug_assert!(!self.history.is_empty());
-        sink(DecodedChunk::Repeated {
-            byte: 0,
-            len: count,
-        })
-        .map_err(StreamDecodeError::Sink)?;
+        self.stage.emit(
+            DecodedChunk::Repeated {
+                byte: 0,
+                len: count,
+            },
+            sink,
+        )?;
         self.written += count;
         Ok(())
     }
@@ -1379,7 +1392,7 @@ impl<B: Budget> StreamingOutput<B> {
         if self.pending.is_empty() {
             return Ok(());
         }
-        sink(DecodedChunk::Bytes(&self.pending)).map_err(StreamDecodeError::Sink)?;
+        self.stage.emit(DecodedChunk::Bytes(&self.pending), sink)?;
         let incoming = &self.pending[self.pending.len().saturating_sub(self.history_limit)..];
         let keep = self.history.len().min(self.history_limit - incoming.len());
         let required = keep + incoming.len();
@@ -1403,11 +1416,155 @@ impl<B: Budget> StreamingOutput<B> {
         &mut self,
         sink: &mut impl FnMut(DecodedChunk<'_>) -> std::result::Result<(), E>,
     ) -> std::result::Result<(), StreamDecodeError<E>> {
-        self.flush(sink)
+        self.flush(sink)?;
+        self.stage.finish()
     }
 
     fn into_history(self) -> Buffer<u8, B> {
         self.history.into_buffer()
+    }
+}
+
+/// Decoded bytes on their way to the sink, with the member's filters applied
+/// in place. A filter is declared before the bytes it covers, so bytes before
+/// the next filter pass straight through, and a filter's range is held until
+/// it is complete, transformed, and released. History keeps the unfiltered
+/// bytes, which later matches copy from.
+///
+/// Filters must arrive in order and not overlap, each at most
+/// `MAX_STREAMED_FILTER_LENGTH` long, at most `MAX_STREAMED_FILTERS` held at
+/// once; anything else ends streaming with `StreamDecodeError::FilteredMember`.
+struct FilterStage<B: Budget = Allowance> {
+    /// Accepted and not yet applied, in output order.
+    filters: Buffer<PendingFilter, B>,
+    /// Bytes from the next filter's start up to `position`.
+    held: Buffer<u8, B>,
+    /// Output position of the next byte to arrive.
+    position: usize,
+    /// End of the last filter accepted.
+    filtered_to: usize,
+    control: crate::read_control::ReadControl,
+}
+
+impl<B: Budget> FilterStage<B> {
+    fn new(allowance: &B) -> Self {
+        Self {
+            filters: Buffer::new(allowance),
+            held: Buffer::new(allowance),
+            position: 0,
+            filtered_to: 0,
+            control: crate::read_control::ReadControl::default(),
+        }
+    }
+
+    /// Accepts a filter whose bytes have not arrived yet.
+    fn hold<E>(&mut self, filter: PendingFilter) -> std::result::Result<(), StreamDecodeError<E>> {
+        if filter.start < self.filtered_to
+            || filter.length > MAX_STREAMED_FILTER_LENGTH
+            || self.filters.len() >= MAX_STREAMED_FILTERS
+        {
+            return Err(StreamDecodeError::FilteredMember);
+        }
+        self.filtered_to = filter.start + filter.length;
+        self.filters.try_push(filter)?;
+        Ok(())
+    }
+
+    fn emit<E>(
+        &mut self,
+        chunk: DecodedChunk<'_>,
+        sink: &mut impl FnMut(DecodedChunk<'_>) -> std::result::Result<(), E>,
+    ) -> std::result::Result<(), StreamDecodeError<E>> {
+        let Some(next) = self.filters.first() else {
+            self.position += chunk_len(chunk);
+            return sink(chunk).map_err(StreamDecodeError::Sink);
+        };
+        let mut chunk = chunk;
+        if self.held.is_empty() {
+            let direct = (next.start - self.position).min(chunk_len(chunk));
+            if direct != 0 {
+                let (head, tail) = split_chunk(chunk, direct);
+                sink(head).map_err(StreamDecodeError::Sink)?;
+                self.position += direct;
+                chunk = tail;
+            }
+        }
+        match chunk {
+            DecodedChunk::Bytes(bytes) => self
+                .held
+                .extend_from_slice(bytes)
+                .map_err(|error| StreamDecodeError::Decode(error.into()))?,
+            DecodedChunk::Repeated { byte, len } => {
+                self.held.resize(self.held.len() + len, byte)?;
+            }
+        }
+        self.position += chunk_len(chunk);
+        self.release(sink)
+    }
+
+    /// Applies every filter whose range is complete, in order, and passes on
+    /// the bytes before the next one.
+    fn release<E>(
+        &mut self,
+        sink: &mut impl FnMut(DecodedChunk<'_>) -> std::result::Result<(), E>,
+    ) -> std::result::Result<(), StreamDecodeError<E>> {
+        while let Some(&filter) = self.filters.first() {
+            if filter.start + filter.length > self.position {
+                break;
+            }
+            let held_start = self.position - self.held.len();
+            let at = filter.start - held_start;
+            let allowance = self.held.allowance();
+            apply_filter_data_with_allowance(
+                &mut self.held[at..at + filter.length],
+                &filter,
+                &self.control,
+                &allowance,
+            )?;
+            self.filters.remove(0);
+            let to = self
+                .filters
+                .first()
+                .map_or(self.position, |next| next.start.min(self.position));
+            let count = to - held_start;
+            if count != 0 {
+                sink(DecodedChunk::Bytes(&self.held[..count])).map_err(StreamDecodeError::Sink)?;
+                self.held.discard_prefix(count);
+            }
+        }
+        Ok(())
+    }
+
+    /// Every byte has arrived: each filter has been applied and released.
+    fn finish<E>(&self) -> std::result::Result<(), StreamDecodeError<E>> {
+        if self.filters.is_empty() && self.held.is_empty() {
+            Ok(())
+        } else {
+            Err(Error::InvalidData("RAR 5 filter range exceeds output").into())
+        }
+    }
+}
+
+fn chunk_len(chunk: DecodedChunk<'_>) -> usize {
+    match chunk {
+        DecodedChunk::Bytes(bytes) => bytes.len(),
+        DecodedChunk::Repeated { len, .. } => len,
+    }
+}
+
+fn split_chunk(chunk: DecodedChunk<'_>, at: usize) -> (DecodedChunk<'_>, DecodedChunk<'_>) {
+    match chunk {
+        DecodedChunk::Bytes(bytes) => {
+            let (head, tail) = bytes.split_at(at);
+            (DecodedChunk::Bytes(head), DecodedChunk::Bytes(tail))
+        }
+        DecodedChunk::Repeated { byte, len } => (
+            DecodedChunk::Repeated { byte, len: at },
+            DecodedChunk::Repeated {
+                byte,
+                len: len - at,
+            },
+        ),
     }
 }
 

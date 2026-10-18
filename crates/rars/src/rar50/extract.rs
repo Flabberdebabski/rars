@@ -13,9 +13,10 @@ use crate::error::{Error, Result};
 use crate::volume_extract::{ChainedReader, SplitVolumeState, SplitVolumeStep};
 use std::io::{Read, Write};
 
-// Filtered RAR5 members still need whole-member byte transforms. Members at or
-// below this boundary use the buffered path, while larger members stream once
-// and reject filtered streams through the codec's typed sentinel.
+// Members at or below this boundary use the buffered path, while larger members
+// stream once. The streaming decoder applies filters in place and rejects only a
+// filter it cannot hold (longer than unrar's 4 MiB block, out of order, or past
+// unrar's 8192 pending filters) through the codec's typed sentinel.
 #[cfg(not(test))]
 const BUFFERED_DECODE_LIMIT: u64 = 512 * 1024 * 1024;
 #[cfg(test)]
@@ -1334,7 +1335,8 @@ fn rar50_buffered_decode_limit(options: crate::ArchiveReadOptions<'_>) -> u64 {
 
 /// Streams a RAR 5 multivolume archive set to caller-provided writers.
 /// Compressed logical members obey the same buffered-decode threshold as ordinary
-/// members. Above it, filtered members return a typed limit error. Direct sinks
+/// members. Above it, a filter the streaming decoder cannot hold returns a typed
+/// limit error. Direct sinks
 /// can receive data before an integrity or decoding failure; callers requiring
 /// verified publication must stage output until extraction succeeds.
 pub fn extract_volumes_to<F>(
@@ -2214,7 +2216,7 @@ mod tests {
     }
 
     #[test]
-    fn streaming_checkpoint_rolls_back_filter_sink_cancellation_and_integrity_failures() {
+    fn streaming_checkpoint_rolls_back_sink_cancellation_and_integrity_failures() {
         let mut word = 0x1234_5678u32;
         // Avoid a period aligned with the 64 KiB flush: appending or resetting
         // to the first failed flush must change the successor's match bytes.
@@ -2247,22 +2249,6 @@ mod tests {
             "next member must use old history"
         );
 
-        let filtered_data = b"late filter checkpoint bytes\n".repeat(8192);
-        let filtered_bytes = Rar50Writer::new(
-            WriterOptions::new(ArchiveVersion::Rar50, FeatureSet::store_only())
-                .with_compression_level(1),
-        )
-        .entry(entry(b"filtered", &filtered_data))
-        .filter_policy(FilterPolicy::Explicit(crate::FilterSpec::range(
-            FilterKind::E8,
-            128 * 1024..filtered_data.len(),
-        )))
-        .finish()
-        .unwrap();
-        let filtered_archive = Archive::parse_owned(filtered_bytes).unwrap();
-        let mut filtered = filtered_archive.files().next().unwrap().clone();
-        filtered.compression_info |= 0x40;
-
         struct CancelOnWrite<'a> {
             token: &'a crate::ReadCancellation,
             written: usize,
@@ -2287,20 +2273,12 @@ mod tests {
             }
         }
 
-        for failure in ["filter", "sink", "cancellation", "integrity"] {
+        for failure in ["sink", "cancellation", "integrity"] {
             let mut session = DecoderSession::with_allowance(None, 0, &Allowance::default());
             session
                 .write_file_to(&archive, files[0], &mut std::io::sink())
                 .unwrap();
             match failure {
-                "filter" => {
-                    let mut partial = Vec::new();
-                    let error = session
-                        .write_file_to(&filtered_archive, &filtered, &mut partial)
-                        .unwrap_err();
-                    assert_eq!(error.kind(), crate::ErrorKind::ResourceLimit);
-                    assert!(partial.len() >= 64 * 1024, "filter follows a flush");
-                }
                 "sink" => {
                     let error = session
                         .write_file_to(&archive, files[0], &mut RejectWrite)
@@ -2845,7 +2823,7 @@ mod tests {
     }
 
     #[test]
-    fn streaming_filtered_members_return_typed_error_without_preflight_decode() {
+    fn streaming_filtered_members_decode_in_full() {
         for prefix_len in [0, 64 * 1024] {
             let mut data = vec![b'P'; prefix_len];
             while (data.len() - prefix_len) as u64 <= BUFFERED_DECODE_LIMIT {
@@ -2896,17 +2874,9 @@ mod tests {
             assert_eq!(*captured.borrow(), data);
 
             let mut out = Vec::new();
-            let error = file.write_to(&archive, None, &mut out).unwrap_err();
+            file.write_to(&archive, None, &mut out).unwrap();
 
-            assert!(matches!(
-                error,
-                Error::AtEntry {
-                    operation: "decoding",
-                    source,
-                    ..
-                } if matches!(*source, Error::Rar50BufferedDecodeLimitExceeded { .. })
-            ));
-            assert_eq!(out, data[..prefix_len]);
+            assert_eq!(out, data);
         }
     }
 

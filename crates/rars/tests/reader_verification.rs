@@ -1,6 +1,6 @@
 #![cfg(feature = "write")]
 
-use rars::codec::rar50::{DecodedChunk, StreamDecodeError, Unpack50Decoder};
+use rars::codec::rar50::{DecodedChunk, Unpack50Decoder};
 use rars::rar50::{ArchiveEntry, Block, Rar50Writer, WriterOptions};
 use rars::{
     test_volumes_with_options, test_volumes_with_options_and_callback, Archive, ArchiveReadOptions,
@@ -136,11 +136,8 @@ fn filtered_verification_charges_total_output_once_and_preserves_explicit_routin
             Ok::<(), io::Error>(())
         },
     );
-    assert!(matches!(result, Err(StreamDecodeError::FilteredMember)));
-    assert!(
-        emitted >= 64 * 1024,
-        "filter must follow a real streaming flush"
-    );
+    result.unwrap();
+    assert_eq!(emitted, data.len());
     let exact = ArchiveReadOptions::new()
         .with_max_member_output_bytes(data.len() as u64)
         .with_max_total_output_bytes(data.len() as u64);
@@ -161,14 +158,9 @@ fn filtered_verification_charges_total_output_once_and_preserves_explicit_routin
         ),
         Error::TotalOutputLimitExceeded { .. }
     ));
-    assert!(matches!(
-        cause(
-            &archive
-                .test_with_options(exact.with_rar50_buffered_decode_limit(0))
-                .unwrap_err()
-        ),
-        Error::Rar50BufferedDecodeLimitExceeded { limit: 0, .. }
-    ));
+    archive
+        .test_with_options(exact.with_rar50_buffered_decode_limit(0))
+        .unwrap();
     archive
         .test_with_options(exact.with_rar50_buffered_decode_limit(data.len() as u64))
         .unwrap();
@@ -294,7 +286,7 @@ fn cancellation_during_payload_read_is_not_hidden_or_reported_as_success() {
 }
 
 #[test]
-fn filtered_member_above_the_default_buffer_limit_is_not_replayed() {
+fn filtered_member_above_the_default_buffer_limit_streams_once() {
     let (bytes, _) = late_filtered();
     let (mut archive, attempts) = reader(bytes, false, None);
     let required = 512 * 1024 * 1024 + 1;
@@ -307,9 +299,12 @@ fn filtered_member_above_the_default_buffer_limit_is_not_replayed() {
         }
     }
     let error = archive.test(None).unwrap_err();
-    assert!(
-        matches!(cause(&error), Error::Rar50BufferedDecodeLimitExceeded { limit: 536_870_912, required: value } if *value == required)
-    );
+    // The size claims more output than the packed stream holds, so streaming
+    // it runs out of input, and the reader does not go back for a second pass.
+    assert!(matches!(
+        cause(&error),
+        Error::Codec(rars::codec::Error::NeedMoreInput)
+    ));
     assert_eq!(attempts.load(Ordering::Relaxed), 1);
 }
 
@@ -572,13 +567,7 @@ fn fragmented_filtered_verification_charges_once_and_preserves_scratch_limits() 
     })
     .unwrap();
     assert_eq!(seen, [b"payload".to_vec()]);
-    assert!(matches!(
-        cause(
-            &test_volumes_with_options(&volumes, exact.with_rar50_buffered_decode_limit(0))
-                .unwrap_err()
-        ),
-        Error::Rar50BufferedDecodeLimitExceeded { .. }
-    ));
+    test_volumes_with_options(&volumes, exact.with_rar50_buffered_decode_limit(0)).unwrap();
     let scratch =
         rars::Rar50Scratch::new(&*root, 2 * 1024 * 1024).with_filter_memory_limit(128 * 1024);
     test_volumes_with_options(
