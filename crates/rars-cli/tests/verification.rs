@@ -130,8 +130,8 @@ fn filtered_test_preserves_limits_and_publishes_success_only_after_verification(
         std::slice::from_ref(&path),
         &["--rar50-buffered-decode-limit", "0"],
     );
-    assert!(!result.status.success());
-    assert!(result.stdout.is_empty());
+    success(&result);
+    assert_eq!(result.stdout, b"OK payload\n");
     let limit = (count.parse::<usize>().unwrap() - 1).to_string();
     let result = test(&[path], &["--max-total-output-bytes", &limit]);
     assert!(!result.status.success());

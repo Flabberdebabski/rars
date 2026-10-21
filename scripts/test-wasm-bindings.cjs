@@ -203,7 +203,10 @@ check('reader quota errors retain structured exact amounts and contexts', () => 
     refuses(() => compressed.test(undefined, settings), 'RESOURCE_LIMIT');
   compressed.free();
   const filtered = new engine.RarFile(fixture('rar50/filter_delta.rar'));
-  refuses(() => filtered.test(undefined, {rar50BufferedDecodeLimit: 1}), 'RESOURCE_LIMIT');
+  const expected = filtered.readAt(0);
+  assert.ok(expected.length > 0);
+  assert.doesNotThrow(() => filtered.test(undefined, {rar50BufferedDecodeLimit: 1}));
+  assert.deepEqual(filtered.readAt(0, undefined, {rar50BufferedDecodeLimit: 1}), expected);
   filtered.free();
 });
 check('legacy decoded names and JavaScript getter failures survive conversion', () => {

@@ -217,8 +217,8 @@ fn crypto_key_equality_and_debug_do_not_require_derivation() {
 fn small_explicit_delta_decodes_without_crypto_or_recovery() {
     use crate::rar50::{ArchiveEntry, Rar50Writer, WriterOptions};
     use crate::{
-        ArchiveReadOptions, ArchiveReader, ArchiveVersion, EntrySource, Error, FeatureSet,
-        FilterKind, FilterPolicy, FilterSpec,
+        ArchiveReadOptions, ArchiveReader, ArchiveVersion, EntrySource, FeatureSet, FilterKind,
+        FilterPolicy, FilterSpec,
     };
     let data: Vec<u8> = (0..512).map(|i| (i / 4) as u8).collect();
     let bytes = Rar50Writer::new(
@@ -244,18 +244,10 @@ fn small_explicit_delta_decodes_without_crypto_or_recovery() {
         .unwrap()
         .is_stored());
     assert_eq!(archive.read_member_at(0, None).unwrap().unwrap(), data);
-    // An unfiltered compressed member succeeds on this route. This exact
-    // refusal proves the produced archive actually contains a filter command.
-    let error = archive
+    // The streaming route applies the filter too.
+    archive
         .test_with_options(ArchiveReadOptions::new().with_rar50_buffered_decode_limit(0))
-        .unwrap_err();
-    assert_eq!(
-        error.root_cause(),
-        &Error::Rar50BufferedDecodeLimitExceeded {
-            limit: 0,
-            required: 512
-        }
-    );
+        .unwrap();
     let plain_bytes = Rar50Writer::new(
         WriterOptions::new(ArchiveVersion::Rar50, FeatureSet::store_only())
             .with_compression_level(1)
@@ -280,4 +272,22 @@ fn small_explicit_delta_decodes_without_crypto_or_recovery() {
         .test_with_options(ArchiveReadOptions::new().with_rar50_buffered_decode_limit(0))
         .unwrap();
     assert_eq!(plain.read_member_at(0, None).unwrap().unwrap(), data);
+    // The same bytes without the filter policy pack differently, so the
+    // member above carries a filter command.
+    assert_ne!(
+        archive
+            .as_rar50()
+            .unwrap()
+            .files()
+            .next()
+            .unwrap()
+            .packed_size(),
+        plain
+            .as_rar50()
+            .unwrap()
+            .files()
+            .next()
+            .unwrap()
+            .packed_size()
+    );
 }

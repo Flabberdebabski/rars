@@ -160,10 +160,13 @@ pub struct ArchiveReadOptions<'a> {
     /// Optional RAR 5 whole-member buffered decode limit, including logical
     /// members split across volumes. This does not bound decoder dictionaries.
     ///
-    /// Compressed members above this limit use the streaming path. Without
-    /// `rar50_scratch`, filtered streams return a typed buffered-decode-limit
-    /// error. With scratch enabled, member bytes and filter records live on disk
-    /// and each filter uses the scratch policy's separate workspace limit.
+    /// Compressed members above this limit use the streaming path, which holds
+    /// each filtered block in the reader workspace until it is complete and then
+    /// applies the filter. Without `rar50_scratch`, a filter the stream cannot
+    /// hold (a block over 4 MiB, one starting before the previous one ends, or
+    /// more than 8192 pending) returns a typed buffered-decode-limit error. With
+    /// scratch enabled, member bytes and filter records live on disk and each
+    /// filter uses the scratch policy's separate workspace limit.
     pub rar50_buffered_decode_limit: Option<u64>,
     /// Optional disk-backed decoding above the whole-member buffering threshold.
     /// Uses separate scratch-disk and filter-workspace quotas; it does not bound

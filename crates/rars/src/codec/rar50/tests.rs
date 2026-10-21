@@ -2802,25 +2802,210 @@ fn rar50_e8_filter_wraps_file_offset_modulo_16m() {
     assert_eq!(decoded, encoded);
 }
 
+/// Streams `packed` with no filter-record destination, collecting the output.
+fn stream_without_filter_records(
+    packed: &[u8],
+    output_size: usize,
+) -> std::result::Result<Vec<u8>, StreamDecodeError<std::convert::Infallible>> {
+    let mut output = Vec::new();
+    Unpack50Decoder::new().decode_member_from_reader_with_dictionary_to_sink(
+        &mut &packed[..],
+        0,
+        output_size,
+        DEFAULT_DICTIONARY_SIZE,
+        false,
+        |chunk| {
+            match chunk {
+                DecodedChunk::Bytes(bytes) => output.extend_from_slice(bytes),
+                DecodedChunk::Repeated { byte, len } => {
+                    output.extend(std::iter::repeat_n(byte, len));
+                }
+            }
+            Ok(())
+        },
+    )?;
+    Ok(output)
+}
+
 #[test]
-fn streaming_decode_reports_filtered_member_with_typed_sentinel() {
-    let data = b"\xe8\0\0\0\0plain text after call".to_vec();
-    let input = encode_lz_member_with_filter(&data, crate::FilterKind::E8).unwrap();
-    let mut reader = input.as_slice();
-    let mut decoder = Unpack50Decoder::new();
+fn streaming_decode_applies_each_filter_kind() {
+    let cases = [
+        (
+            (0..96).map(|index| (index * 7 + index / 3) as u8).collect(),
+            crate::FilterKind::Delta { channels: 3 },
+        ),
+        (
+            b"\xe8\0\0\0\0plain text after call".to_vec(),
+            crate::FilterKind::E8,
+        ),
+        (
+            b"\xe9\0\0\0\0jump target through e9".to_vec(),
+            crate::FilterKind::E8E9,
+        ),
+        (
+            vec![0x04, 0x00, 0x00, 0xeb, b'A', b'R', b'M', b'!'],
+            crate::FilterKind::Arm,
+        ),
+    ];
 
-    let error = decoder
-        .decode_member_from_reader_with_dictionary_to_sink(
-            &mut reader,
-            0,
-            data.len(),
-            128 * 1024,
-            false,
-            |_chunk| Ok::<_, std::convert::Infallible>(()),
+    for (expected, kind) in cases {
+        let packed = encode_lz_member_with_filter(&expected, kind).unwrap();
+
+        let output = stream_without_filter_records(&packed, expected.len()).unwrap();
+
+        assert_eq!(output, expected, "{kind:?}");
+    }
+}
+
+/// x86-like code: calls to a few functions from successive addresses.
+fn x86_calls(len: usize) -> Vec<u8> {
+    let mut out = Vec::with_capacity(len + 16);
+    let mut index = 0u32;
+    while out.len() < len {
+        out.extend_from_slice(&[0x55, 0x48, 0x89, 0xe5, 0xe8]);
+        let target = 0x1000 + (index % 7) * 0x40;
+        let relative = target.wrapping_sub(out.len() as u32 + 4);
+        out.extend_from_slice(&relative.to_le_bytes());
+        out.extend_from_slice(&[0x5d, 0xc3]);
+        index += 1;
+    }
+    out.truncate(len);
+    out
+}
+
+#[test]
+fn streaming_decode_applies_filters_across_flushes_and_zero_runs() {
+    // Zeros first, so the decoder emits them as repeated runs, then code.
+    let mut data = vec![0; 150_000];
+    data.extend(x86_calls(250_000));
+    let filters = [
+        crate::FilterSpec::range(crate::FilterKind::Delta { channels: 2 }, 100_000..170_000),
+        crate::FilterSpec::range(crate::FilterKind::E8, 180_000..260_000),
+        crate::FilterSpec::range(crate::FilterKind::E8E9, 260_000..400_000),
+    ];
+    let packed = Unpack50Encoder::new()
+        .encode_member_with_filters(&data, 0, &filters)
+        .unwrap();
+
+    let output = stream_without_filter_records(&packed, data.len()).unwrap();
+
+    assert!(output == data, "the streamed bytes differ");
+}
+
+fn pending(filter_type: FilterType, start: usize, length: usize) -> PendingFilter {
+    PendingFilter {
+        start,
+        length,
+        filter_type,
+        channels: if filter_type == FilterType::Delta {
+            3
+        } else {
+            0
+        },
+    }
+}
+
+#[test]
+fn filter_stage_output_matches_filters_applied_to_the_whole_output() {
+    let mut data: Vec<u8> = (0..300_000u32).map(|i| (i * 31 % 251) as u8).collect();
+    data[200_000..210_000].fill(0);
+    let filters = [
+        pending(FilterType::Delta, 1_000, 70_000),
+        pending(FilterType::E8, 71_000, 0),
+        pending(FilterType::E8E9, 100_000, 4_096),
+        pending(FilterType::Arm, 104_096, 60_000),
+        pending(FilterType::Delta, 195_000, 20_000),
+    ];
+    let mut expected = data.clone();
+    apply_filters_with_control(
+        &mut expected,
+        &filters,
+        &crate::read_control::ReadControl::default(),
+    )
+    .unwrap();
+    let mut stage = FilterStage::new(&Allowance::default());
+    let mut output = Vec::new();
+    let mut sink = |chunk: DecodedChunk<'_>| {
+        match chunk {
+            DecodedChunk::Bytes(bytes) => output.extend_from_slice(bytes),
+            DecodedChunk::Repeated { byte, len } => output.extend(std::iter::repeat_n(byte, len)),
+        }
+        Ok::<(), std::convert::Infallible>(())
+    };
+
+    let mut at = 0;
+    let mut declared = 0;
+    for size in [7, 65_536, 1, 30_000].into_iter().cycle() {
+        if at == data.len() {
+            break;
+        }
+        // Each filter is declared once the bytes before it have arrived.
+        while declared < filters.len() && filters[declared].start <= at + size {
+            stage
+                .hold::<std::convert::Infallible>(filters[declared])
+                .unwrap();
+            declared += 1;
+        }
+        if at == 200_000 {
+            stage
+                .emit(
+                    DecodedChunk::Repeated {
+                        byte: 0,
+                        len: 10_000,
+                    },
+                    &mut sink,
+                )
+                .unwrap();
+            at += 10_000;
+            continue;
+        }
+        let end = (at + size)
+            .min(data.len())
+            .min(if at < 200_000 { 200_000 } else { data.len() });
+        stage
+            .emit(DecodedChunk::Bytes(&data[at..end]), &mut sink)
+            .unwrap();
+        at = end;
+    }
+    stage.finish::<std::convert::Infallible>().unwrap();
+
+    assert!(output == expected, "the staged bytes differ");
+}
+
+#[test]
+fn filter_stage_leaves_filters_it_cannot_hold_to_the_caller() {
+    let refused = |stage: &mut FilterStage, filter| {
+        matches!(
+            stage.hold::<std::convert::Infallible>(filter),
+            Err(StreamDecodeError::FilteredMember)
         )
-        .unwrap_err();
+    };
+    let mut stage = FilterStage::new(&Allowance::default());
 
-    assert!(matches!(error, StreamDecodeError::FilteredMember));
+    assert!(refused(
+        &mut stage,
+        pending(FilterType::E8, 0, MAX_STREAMED_FILTER_LENGTH + 1)
+    ));
+    stage
+        .hold::<std::convert::Infallible>(pending(FilterType::E8, 100, 50))
+        .unwrap();
+    assert!(
+        refused(&mut stage, pending(FilterType::E8, 120, 10)),
+        "overlapping"
+    );
+    assert!(
+        refused(&mut stage, pending(FilterType::E8, 40, 10)),
+        "out of order"
+    );
+    let mut full = FilterStage::new(&Allowance::default());
+    for start in 0..MAX_STREAMED_FILTERS {
+        full.hold::<std::convert::Infallible>(pending(FilterType::E8, start, 1))
+            .unwrap();
+    }
+    assert!(
+        refused(&mut full, pending(FilterType::E8, MAX_STREAMED_FILTERS, 1)),
+        "too many"
+    );
 }
 
 #[test]
@@ -5767,4 +5952,94 @@ fn control_only_block(symbol: usize) -> Vec<u8> {
     writer.write_bits(1, 1);
     let payload_bits = writer.bit_pos;
     encode_compressed_block(&writer.finish(), payload_bits, true, true).unwrap()
+}
+
+#[test]
+fn filter_stage_passes_on_what_follows_a_filter_as_it_arrived() {
+    // The run after the filter is larger than the workspace may hold.
+    let mut stage = FilterStage::new(&Allowance::limited(64 * 1024));
+    stage
+        .hold::<std::convert::Infallible>(pending(FilterType::Delta, 0, 9))
+        .unwrap();
+    let mut chunks = Vec::new();
+    let mut sink = |chunk: DecodedChunk<'_>| {
+        chunks.push(match chunk {
+            DecodedChunk::Bytes(bytes) => format!("bytes {}", bytes.len()),
+            DecodedChunk::Repeated { len, .. } => format!("repeated {len}"),
+        });
+        Ok::<(), std::convert::Infallible>(())
+    };
+
+    stage.emit(DecodedChunk::Bytes(&[1; 6]), &mut sink).unwrap();
+    stage
+        .emit(
+            DecodedChunk::Repeated {
+                byte: 0,
+                len: 1 << 20,
+            },
+            &mut sink,
+        )
+        .unwrap();
+    stage.finish::<std::convert::Infallible>().unwrap();
+
+    assert_eq!(
+        chunks,
+        ["bytes 9".to_string(), format!("repeated {}", (1 << 20) - 3)]
+    );
+}
+
+#[test]
+fn filter_stage_drains_a_full_queue_of_filters_in_order() {
+    let data: Vec<u8> = (0..MAX_STREAMED_FILTERS * 16)
+        .map(|i| (i * 7 % 253) as u8)
+        .collect();
+    let filters: Vec<_> = (0..MAX_STREAMED_FILTERS)
+        .map(|i| pending(FilterType::Delta, i * 16 + 2, 12))
+        .collect();
+    let mut expected = data.clone();
+    apply_filters_with_control(
+        &mut expected,
+        &filters,
+        &crate::read_control::ReadControl::default(),
+    )
+    .unwrap();
+    let mut stage = FilterStage::new(&Allowance::default());
+    for &filter in &filters {
+        stage.hold::<std::convert::Infallible>(filter).unwrap();
+    }
+    let mut output = Vec::new();
+    let mut sink = |chunk: DecodedChunk<'_>| {
+        match chunk {
+            DecodedChunk::Bytes(bytes) => output.extend_from_slice(bytes),
+            DecodedChunk::Repeated { byte, len } => output.extend(std::iter::repeat_n(byte, len)),
+        }
+        Ok::<(), std::convert::Infallible>(())
+    };
+
+    for piece in data.chunks(1_000) {
+        stage.emit(DecodedChunk::Bytes(piece), &mut sink).unwrap();
+    }
+    stage.finish::<std::convert::Infallible>().unwrap();
+
+    assert!(output == expected, "the staged bytes differ");
+}
+
+#[test]
+fn filter_stage_frees_a_place_in_a_full_queue_once_a_filter_is_applied() {
+    let mut stage = FilterStage::new(&Allowance::default());
+    for i in 0..MAX_STREAMED_FILTERS {
+        stage
+            .hold::<std::convert::Infallible>(pending(FilterType::E8, i * 16, 8))
+            .unwrap();
+    }
+
+    stage
+        .emit(DecodedChunk::Bytes(&[0; 16]), &mut |_: DecodedChunk<'_>| {
+            Ok::<(), std::convert::Infallible>(())
+        })
+        .unwrap();
+
+    stage
+        .hold::<std::convert::Infallible>(pending(FilterType::E8, MAX_STREAMED_FILTERS * 16, 8))
+        .unwrap();
 }
