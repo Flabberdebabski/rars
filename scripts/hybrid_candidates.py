@@ -147,6 +147,19 @@ def phase_threads(m, phase):
     return execution_settings(m.get("execution"))[phase + "_threads"]
 
 
+def fixed_dictionary(value, profiles, experiment):
+    if value is None:
+        return None
+    if experiment != "controls":
+        raise RunError("fixed_dictionary_bytes is supported only for controls experiments")
+    if (isinstance(value, bool) or not isinstance(value, int) or value < 128 * 1024
+            or value & (value - 1)):
+        raise RunError("fixed_dictionary_bytes must be a power of two of at least 128 KiB")
+    if any(value > (4 if profile == "desktop" else 64) * 1024**2 for profile in profiles):
+        raise RunError("fixed_dictionary_bytes exceeds the selected profile dictionary ceiling")
+    return value
+
+
 def inventory(value=None):
     hosts = value or [{"id": "local", "kind": "local", "hostname": socket.gethostname()}]
     if not hosts or len({h.get("id") for h in hosts}) != len(hosts):
@@ -254,6 +267,7 @@ def freeze(args):
     profiles = args.profile or ["desktop"]
     experiment = getattr(args, "experiment", "controls")
     matrix = configs(profiles, experiment)
+    dictionary = fixed_dictionary(plan.get("fixed_dictionary_bytes"), profiles, experiment)
     hosts = inventory(read_json(args.inventory) if args.inventory else None)
     execution = execution_settings(plan.get("execution"))
     for host in hosts:
@@ -292,7 +306,8 @@ def freeze(args):
             name = flag.split("=", 1)[0]
             owned = name in {"--dict-size", "--hybrid-dictionary-ceiling", "--threads", "--memory-limit", "--max-memory"}
             if channel == "rars_add":
-                owned |= name in {"--experimental-hybrid", "--hybrid-variant", "--hybrid-architecture", "--analyze-relationships", "--optimize-member-order", "--auto-filter", "--no-filter"}
+                owned |= name in {"--experimental-hybrid", "--hybrid-variant", "--hybrid-architecture", "--analyze-relationships", "--optimize-member-order"}
+                owned |= experiment == "hybrid" and name in {"--auto-filter", "--no-filter"}
             if channel.startswith("native"):
                 owned = flag.lower().startswith(("-md", "-mt"))
             if owned:
@@ -379,7 +394,7 @@ def freeze(args):
                           "archive_members": arguments, "header_members": header_members,
                           "solid": bool(work.get("solid", False))})
         for case in cases:
-            case["control_settings"] = {profile: control_settings(profile, case) for profile in profiles}
+            case["control_settings"] = {profile: control_settings(profile, case, dictionary) for profile in profiles}
         runner = destination / "frozen/hybrid_candidates.py"
         shutil.copy2(Path(__file__), runner)
         invalid = [{"configuration": c["id"], "case": case["id"],
@@ -387,6 +402,7 @@ def freeze(args):
                    for c in matrix for case in cases if case["solid"] and (mandatory_filter(options) or c["choices"]["automatic_filters"])]
         manifest = {"schema": SCHEMA, "source": source_identity,
                     "experiment": experiment, "capability_preflight": preflight,
+                    "fixed_dictionary_bytes": dictionary,
                     "sample_roles": ["native", "baseline", "candidate", "relationships", "streams"] if experiment == "hybrid" else ["native", "candidate"] + (["baseline"] if args.baseline else []),
                     "invalid_combinations": invalid,
                     "seed": int(args.seed), "profiles": profiles,
@@ -424,6 +440,11 @@ def load(run):
     inventory(m["hosts"])
     if m["schema"] != SCHEMA or m["configurations"] != configs(m["profiles"], m.get("experiment", "hybrid")):
         raise RunError("configuration matrix differs from the frozen experiment")
+    dictionary = fixed_dictionary(m.get("fixed_dictionary_bytes"), m["profiles"], m.get("experiment", "hybrid"))
+    for case in m["cases"]:
+        expected = {profile: control_settings(profile, case, dictionary) for profile in m["profiles"]}
+        if case["control_settings"] != expected:
+            raise RunError("control resources differ from the frozen dictionary selection")
     if m["confirmation_repetitions"] != 15 or m["max_finalists_per_profile"] != 3:
         raise RunError("confirmation contract changed")
     for b in m["binaries"].values():
@@ -591,7 +612,7 @@ def valid_cases(m, configuration):
     return {case["id"] for case in m["cases"]} - excluded
 
 
-def control_settings(profile, case):
+def control_settings(profile, case, fixed_dictionary_bytes=None):
     if profile not in PROFILES:
         raise RunError("unknown control profile")
     sizes = [record["bytes"] for record in case["members"].values() if record["type"] == "file"]
@@ -599,7 +620,9 @@ def control_settings(profile, case):
         raise RunError("control dictionary requires nonnegative frozen member sizes")
     reach = sum(sizes) if case["solid"] else max(sizes, default=0)
     ceiling = (4 if profile == "desktop" else 64) * 1024**2
-    dictionary = min(ceiling, max(128 * 1024, 1 << max(0, reach - 1).bit_length()))
+    dictionary = fixed_dictionary(fixed_dictionary_bytes, [profile], "controls")
+    if dictionary is None:
+        dictionary = min(ceiling, max(128 * 1024, 1 << max(0, reach - 1).bit_length()))
     return {"dictionary_reach_bytes": reach, "dictionary_bytes": dictionary,
             "dictionary_ceiling_bytes": ceiling, "encoder_threads": 1,
             "memory_limit_bytes": (256 * 1024**2 if profile == "desktop" else 8 * 1024**3)}
@@ -609,7 +632,7 @@ def compression_command(m, run, role, configuration, case, archive, member_order
     binary_role = "native" if role == "native_ordered" else (role if role in m["binaries"] else "candidate")
     binary = str(run / m["binaries"][binary_role]["path"])
     opts = m["worker_options"]
-    settings = control_settings(configuration["profile"], case)
+    settings = control_settings(configuration["profile"], case, m.get("fixed_dictionary_bytes"))
     threads = phase_threads(m, phase)
     if role in ("native", "native_ordered"):
         return [binary, "a", "-idq", "-y", "-ma5", "-m3", f'-md{settings["dictionary_bytes"] // 1024}k', f"-mt{threads}",

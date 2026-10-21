@@ -137,6 +137,60 @@ class RunnerTests(unittest.TestCase):
             self.freeze()
         self.assertFalse(self.run.exists())
 
+    def test_controls_freeze_fixed_dictionary_and_filters_for_every_role(self):
+        self.experiment = "controls"
+        m = self.freeze(fixed_dictionary_bytes=4 * 1024**2,
+                        worker_options={"rars_add": ["--no-filter"], "native_add": ["-mc-"]})
+        self.assertEqual(m["fixed_dictionary_bytes"], 4 * 1024**2)
+        self.assertEqual(m, runner.load(self.run))
+        case = m["cases"][0]
+        self.assertEqual(case["control_settings"]["desktop"]["dictionary_bytes"], 4 * 1024**2)
+        configuration = m["configurations"][0]
+        for phase in ("screen", "confirm"):
+            for role in ("candidate", "baseline", "native"):
+                command = runner.compression_command(m, self.run, role, configuration, case,
+                                                     self.root / "archive.rar", phase=phase)
+                if role == "native":
+                    self.assertIn("-md4096k", command)
+                    self.assertIn("-mt1", command)
+                    self.assertIn("-m3", command)
+                    self.assertIn("-mc-", command)
+                else:
+                    self.assertEqual(command[command.index("--dict-size") + 1], str(4 * 1024**2))
+                    self.assertEqual(command[command.index("--threads") + 1], "1")
+                    self.assertEqual(command[command.index("--level") + 1], "3")
+                    self.assertIn("--no-filter", command)
+                    self.assertNotIn("--auto-filter", command)
+                    self.assertNotIn("--experimental-hybrid", command)
+
+    def test_fixed_dictionary_rejected_before_staging(self):
+        self.experiment = "controls"
+        for value in (True, "4194304", 0, 64 * 1024, 192 * 1024, 8 * 1024**2):
+            with self.subTest(value=value), self.assertRaisesRegex(runner.RunError, "fixed_dictionary_bytes"):
+                self.freeze(fixed_dictionary_bytes=value)
+            self.assertFalse(self.run.exists())
+        self.experiment = "hybrid"
+        with self.assertRaisesRegex(runner.RunError, "only for controls"):
+            self.freeze(fixed_dictionary_bytes=4 * 1024**2)
+        self.assertFalse(self.run.exists())
+        self.assertEqual(runner.fixed_dictionary(64 * 1024**2, ["server"], "controls"), 64 * 1024**2)
+        with self.assertRaisesRegex(runner.RunError, "ceiling"):
+            runner.fixed_dictionary(64 * 1024**2, ["desktop", "server"], "controls")
+
+    def test_resume_revalidates_fixed_dictionary_and_resource_records(self):
+        self.experiment = "controls"
+        m = self.freeze(fixed_dictionary_bytes=4 * 1024**2)
+        original = json.loads(json.dumps(m))
+        for field, value in (("fixed_dictionary_bytes", 192 * 1024),
+                             ("fixed_dictionary_bytes", 2 * 1024**2)):
+            with self.subTest(value=value):
+                m = json.loads(json.dumps(original))
+                m[field] = value
+                runner.write_json(self.run / "manifest.json", m)
+                (self.run / "manifest.sha256").write_text(runner.sha(self.run / "manifest.json") + "\n")
+                with self.assertRaises(runner.RunError):
+                    runner.load(self.run)
+
     def test_exact_matrix_and_boundary_validation(self):
         matrix = runner.configs(["desktop", "server"])
         self.assertEqual(len(matrix), 128)

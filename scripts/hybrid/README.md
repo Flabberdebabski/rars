@@ -45,7 +45,8 @@ correctness for the tested inputs.
 Use `--experiment hybrid --rars /path/to/experimental-rars` to opt into the
 archived matrix protocol. This repository does not supply that encoder.
 In default controls mode, both rars and native RAR use the same fitted dictionary
-and matched thread count. No relationship/stream controls or ordering-assisted
+and matched thread count. A controls-only plan may instead freeze
+`fixed_dictionary_bytes` for every workload and encoder role. No relationship/stream controls or ordering-assisted
 native pass are requested. The screening/confirmation workflow, frozen evidence
 and paired measurements below apply to either mode.
 
@@ -172,8 +173,29 @@ retains its diagnostic files and excludes the affected candidate.
 Optional `--plan plan.json` accepts the execution settings above, `worker_options` arrays (`rars_add`,
 `native_add`, `rars_read`, `native_read`), a positive
 `task_timeout_seconds`, and reduced `budgets.screen`/`budgets.confirm` in seconds.
+For controls experiments, `fixed_dictionary_bytes` selects one power-of-two
+dictionary of at least 128 KiB, at most 4 MiB when desktop is selected or 64 MiB
+for server alone. Initialization rejects invalid values before staging. The
+value and each workload's resulting resources are frozen and checked on resume;
+candidate rars, baseline rars and native RAR receive the same dictionary.
+Hybrid experiments reject this override so their adaptive-dictionary comparison
+remains unchanged. For example, a fixed-parser/filter cache comparison can use:
+
+```json
+{
+  "fixed_dictionary_bytes": 4194304,
+  "worker_options": {"rars_add": ["--no-filter"], "native_add": ["-mc-"]},
+  "execution": {"parallel_screening": false, "screen_threads": 1, "confirm_threads": 1}
+}
+```
+
+Controls mode accepts explicit `--no-filter` or `--auto-filter` in `rars_add`
+and passes the same options to candidate and baseline; native filter settings
+must be supplied independently as above. The runner fixes level 3 for all
+encoders. Native RAR uses its own parser, while both rars binaries receive the
+same parser settings.
 Budgets cannot exceed the declared maxima. The six matrix switches cannot be
-injected through worker options.
+injected through worker options in hybrid mode.
 
 For optional cold selective extraction, supply a direct executable helper in the
 same plan:
