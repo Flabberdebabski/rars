@@ -884,6 +884,17 @@ where
                     job.blocks
                         .push_growing((member, job.data.len(), !stream.has_more()))?;
                 }
+                #[cfg(feature = "experimental-ring-state")]
+                if stream.has_more() {
+                    histories[member]
+                        .remember(&job.data, plan.encode_options.max_match_distance)?;
+                } else {
+                    // The final job already owns its input and preceding
+                    // history. No later job can read this member's retained
+                    // buffer, so release it instead of copying terminal bytes.
+                    histories[member] = Buffer::new(allowance);
+                }
+                #[cfg(not(feature = "experimental-ring-state"))]
                 histories[member].remember(&job.data, plan.encode_options.max_match_distance)?;
                 jobs.push(job)?;
             }

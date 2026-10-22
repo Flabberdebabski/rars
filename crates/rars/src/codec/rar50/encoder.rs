@@ -1,5 +1,7 @@
 //! RAR5/7 LZ encoding, block selection, token pricing and table emission.
-use super::super::{huffman, match_finder};
+
+use super::super::huffman;
+use super::super::match_finder;
 use super::*;
 #[cfg(test)]
 use std::io::Write;
@@ -7,6 +9,14 @@ use std::io::Write;
 /// Matches shorter than 4 bytes are never emitted, so candidate positions are
 /// chained by a hash of their first 4 bytes.
 type Rar50MatchFinder<B = Allowance> = match_finder::MatchFinder<4, B>;
+
+type Rar50TreeMatchFinder<B> = match_finder::TreeMatchFinder<B>;
+
+#[cfg(test)]
+fn test_match_finder(window: usize) -> Rar50MatchFinder {
+    Rar50MatchFinder::with_allowance(window, &Allowance::default())
+        .expect("unlimited finder allocation")
+}
 
 const MAX_ENCODER_MATCH_OFFSET: usize = DEFAULT_DICTIONARY_SIZE;
 
@@ -787,13 +797,14 @@ pub(crate) fn streaming_blocks_with_allowance<B: Budget>(
     if first == blocks.len() {
         return Ok(output);
     }
-    let finder = member_finder_with_allowance(&combined, at, options, allowance)?;
     let mut search = if options.optimal_parse {
-        SharedMemberSearch::Optimal(OptimalCollector {
-            finder: CollectorFinder::Chains(finder),
-        })
+        SharedMemberSearch::Optimal(OptimalCollector::with_allowance(
+            &combined, at, options, allowance,
+        )?)
     } else {
-        SharedMemberSearch::Lazy(finder)
+        SharedMemberSearch::Lazy(member_finder_with_allowance(
+            &combined, at, options, allowance,
+        )?)
     };
     for &(end, is_last) in &blocks[first..] {
         let end = start + end;
@@ -1287,8 +1298,76 @@ struct OptimalCollector<B: Budget = Allowance> {
     finder: CollectorFinder<B>,
 }
 
+#[test]
+#[cfg(feature = "experimental-ring-state")]
+fn packed_collector_preserves_frontiers_across_committed_interiors_and_blocks() {
+    let mut state = 0x5e91_d742_037b_a6cdu64;
+    let mut input = vec![0; 1024 * 1024];
+    for byte in &mut input {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        *byte = state as u8;
+    }
+    input.copy_within(0..LZ_BLOCK_SIZE, LZ_BLOCK_SIZE);
+    input.copy_within(0..LZ_BLOCK_SIZE / 2, 2 * LZ_BLOCK_SIZE);
+    let allowance = Allowance::default();
+    let options = EncodeOptions {
+        max_match_distance: 4 * 1024 * 1024,
+        max_match_candidates: 128,
+        optimal_parse: true,
+        ..EncodeOptions::default()
+    };
+    let start = LZ_BLOCK_SIZE;
+    let mut packed = OptimalCollector::with_allowance(&input, start, options, &allowance).unwrap();
+    assert!(matches!(&packed.finder, CollectorFinder::Packed(_)));
+    let mut ordinary = OptimalCollector {
+        finder: CollectorFinder::Chains(
+            member_finder_with_allowance(&input, start, options, &allowance).unwrap(),
+        ),
+    };
+    for block in [
+        start..2 * LZ_BLOCK_SIZE,
+        2 * LZ_BLOCK_SIZE..3 * LZ_BLOCK_SIZE,
+    ] {
+        let expected = ordinary.collect(&input, block.clone(), options).unwrap();
+        let actual = packed.collect(&input, block, options).unwrap();
+        assert_eq!(actual.starts.len(), expected.starts.len());
+        for (offset, (a, e)) in actual
+            .starts
+            .windows(2)
+            .zip(expected.starts.windows(2))
+            .enumerate()
+        {
+            let actual_runs = &actual.runs[a[0] as usize..a[1] as usize];
+            let expected_runs = &expected.runs[e[0] as usize..e[1] as usize];
+            assert!(
+                actual_runs.iter().copied().eq(expected_runs
+                    .iter()
+                    .copied()
+                    .filter(|&(length, _)| length >= 4)),
+                "legal frontier at position {offset}"
+            );
+        }
+    }
+    let small =
+        OptimalCollector::with_allowance(&input[..1024 * 1024 - 1], start, options, &allowance)
+            .unwrap();
+    assert!(matches!(&small.finder, CollectorFinder::Chains(_)));
+    let short_dictionary = EncodeOptions {
+        max_match_distance: 128 * 1024,
+        ..options
+    };
+    let bounded =
+        OptimalCollector::with_allowance(&input, start, short_dictionary, &allowance).unwrap();
+    assert!(matches!(&bounded.finder, CollectorFinder::Chains(_)));
+}
+
 enum CollectorFinder<B: Budget = Allowance> {
-    Tree(match_finder::TreeMatchFinder<B>),
+    #[cfg(feature = "experimental-ring-state")]
+    Packed(super::super::packed_chain::PackedMatchFinder<B>),
+
+    Tree(Rar50TreeMatchFinder<B>),
     Chains(Rar50MatchFinder<B>),
 }
 
@@ -1307,8 +1386,27 @@ impl<B: Budget> OptimalCollector<B> {
         options: EncodeOptions,
         allowance: &B,
     ) -> Result<Self> {
+        #[cfg(feature = "experimental-ring-state")]
+        if start != 0
+            && combined.len() >= 1024 * 1024
+            && combined.len() <= options.max_match_distance.saturating_mul(2)
+            && combined.len() <= u32::MAX as usize / 6
+        {
+            // Captured bounded jobs can store each complete hash chain as a
+            // contiguous byte stream. Static input limits select the backend;
+            // available memory never changes its candidate quality.
+            let mut finder =
+                super::super::packed_chain::PackedMatchFinder::with_allowance(combined, allowance)?;
+            for pos in 0..start.min(combined.len().saturating_sub(3)) {
+                finder.insert(combined, pos);
+            }
+            return Ok(Self {
+                finder: CollectorFinder::Packed(finder),
+            });
+        }
+
         let finder = if start == 0 {
-            CollectorFinder::Tree(match_finder::TreeMatchFinder::with_allowance(
+            CollectorFinder::Tree(Rar50TreeMatchFinder::with_allowance(
                 finder_window(options, combined.len()),
                 allowance,
             )?)
@@ -1337,6 +1435,8 @@ impl<B: Budget> OptimalCollector<B> {
         options: EncodeOptions,
     ) -> Result<BlockMatches<B>> {
         let allowance = match &self.finder {
+            #[cfg(feature = "experimental-ring-state")]
+            CollectorFinder::Packed(finder) => finder.allowance(),
             CollectorFinder::Tree(finder) => finder.allowance(),
             CollectorFinder::Chains(finder) => finder.allowance(),
         };
@@ -1347,6 +1447,22 @@ impl<B: Budget> OptimalCollector<B> {
             runs: Buffer::with_capacity(span, &allowance)?,
             starts: Buffer::with_capacity(span + 1, &allowance)?,
         };
+        #[cfg(feature = "experimental-ring-state")]
+        if let CollectorFinder::Packed(finder) = &mut self.finder {
+            finder
+                .collect_block(
+                    combined,
+                    block,
+                    options.max_match_distance,
+                    options.max_match_candidates,
+                    NICE_MATCH_LENGTH,
+                    MAX_ENCODER_MATCH_LENGTH,
+                    &mut matches.runs,
+                    &mut matches.starts,
+                )
+                .map_err(Into::into)?;
+            return Ok(matches);
+        }
         // The first position past a match the parse will commit to. The parse
         // reaches the same decision from the same lengths, so the two agree on
         // which positions matter without having to be told.
@@ -1357,6 +1473,8 @@ impl<B: Budget> OptimalCollector<B> {
             let max_distance = pos.min(options.max_match_distance);
             let before = matches.runs.len();
             match &mut self.finder {
+                #[cfg(feature = "experimental-ring-state")]
+                CollectorFinder::Packed(_) => unreachable!("packed collector dispatched above"),
                 CollectorFinder::Tree(tree) => {
                     // Inserting into a tree is the same descent as searching
                     // it, so a position the parse steps over is stepped over
@@ -1392,43 +1510,68 @@ impl<B: Budget> OptimalCollector<B> {
                     // Inserting into a chain is one store, so every position
                     // goes in whether or not it is searched from. That keeps a
                     // solid member's candidates exactly what they were.
+
+                    #[cfg(feature = "experimental-ring-state")]
+                    let first_candidate = if combined.len() - pos >= 4 {
+                        finder.insert_and_first(combined, pos)
+                    } else {
+                        match_finder::NO_POSITION
+                    };
+                    #[cfg(not(feature = "experimental-ring-state"))]
                     finder.insert(combined, pos);
                     let max_length = (block.end - pos).min(MAX_ENCODER_MATCH_LENGTH);
                     if !searching || max_distance == 0 || max_length < 4 {
                         continue;
                     }
-                    // The chain walks nearest first, so the first distance to
-                    // reach a length is the cheapest one that can.
-                    let mut longest = 0usize;
-                    let mut checked = 0usize;
-                    let mut candidate = finder.first(combined, pos);
-                    while candidate != match_finder::NO_POSITION
-                        && longest < max_length
-                        && longest < NICE_MATCH_LENGTH
+
+                    #[cfg(feature = "experimental-ring-state")]
+                    finder
+                        .collect_improving(
+                            combined,
+                            pos,
+                            first_candidate,
+                            max_length,
+                            max_distance,
+                            options.max_match_candidates,
+                            NICE_MATCH_LENGTH,
+                            &mut matches.runs,
+                        )
+                        .map_err(Into::into)?;
+                    #[cfg(not(feature = "experimental-ring-state"))]
                     {
-                        if candidate >= pos {
-                            candidate = finder.previous(candidate);
-                            continue;
-                        }
-                        let distance = pos - candidate;
-                        if distance > max_distance {
-                            break;
-                        }
-                        checked += 1;
-                        if combined[candidate + longest] == combined[pos + longest] {
-                            let length = match_length(combined, pos, distance, max_length);
-                            if length > longest {
-                                matches
-                                    .runs
-                                    .push((length as u32, distance as u32))
-                                    .map_err(Into::into)?;
-                                longest = length;
+                        // The chain walks nearest first, so the first distance to
+                        // reach a length is the cheapest one that can.
+                        let mut longest = 0usize;
+                        let mut checked = 0usize;
+                        let mut candidate = finder.first(combined, pos);
+                        while candidate != match_finder::NO_POSITION
+                            && longest < max_length
+                            && longest < NICE_MATCH_LENGTH
+                        {
+                            if candidate >= pos {
+                                candidate = finder.previous(candidate);
+                                continue;
                             }
+                            let distance = pos - candidate;
+                            if distance > max_distance {
+                                break;
+                            }
+                            checked += 1;
+                            if combined[candidate + longest] == combined[pos + longest] {
+                                let length = match_length(combined, pos, distance, max_length);
+                                if length > longest {
+                                    matches
+                                        .runs
+                                        .push((length as u32, distance as u32))
+                                        .map_err(Into::into)?;
+                                    longest = length;
+                                }
+                            }
+                            if checked >= options.max_match_candidates {
+                                break;
+                            }
+                            candidate = finder.previous(candidate);
                         }
-                        if checked >= options.max_match_candidates {
-                            break;
-                        }
-                        candidate = finder.previous(candidate);
                     }
                 }
             }
@@ -1524,6 +1667,8 @@ fn encode_lz_block_in_window(
         MemberSearch::Fresh => Allowance::default(),
         MemberSearch::Lazy(finder) => finder.allowance(),
         MemberSearch::Optimal(collector) => match &collector.finder {
+            #[cfg(feature = "experimental-ring-state")]
+            CollectorFinder::Packed(finder) => finder.allowance(),
             CollectorFinder::Tree(finder) => finder.allowance(),
             CollectorFinder::Chains(finder) => finder.allowance(),
         },
@@ -2091,6 +2236,10 @@ struct OptimalWorkspace<B: Budget = Allowance> {
     arrive_last_length: Buffer<u32, B>,
 }
 
+const OPTIMAL_STATE_RING_SIZE: usize = 8192;
+const _: () = assert!(OPTIMAL_STATE_RING_SIZE.is_power_of_two());
+const _: () = assert!(OPTIMAL_STATE_RING_SIZE > MAX_ENCODER_MATCH_LENGTH);
+
 impl<B: Budget> OptimalWorkspace<B> {
     fn new(allowance: &B) -> Self {
         Self {
@@ -2300,6 +2449,46 @@ fn price_optimal_paths(
     workspace: OptimalSlices<'_>,
     reaches: &mut [(usize, usize, usize)],
 ) {
+    #[cfg(feature = "experimental-ring-state")]
+    if workspace.arrive_reps.len() < block.len() + 1 {
+        price_optimal_paths_with_state::<true>(
+            combined,
+            block,
+            options,
+            distance_size,
+            prices,
+            runs,
+            starts,
+            workspace,
+            reaches,
+        );
+        return;
+    }
+    price_optimal_paths_with_state::<false>(
+        combined,
+        block,
+        options,
+        distance_size,
+        prices,
+        runs,
+        starts,
+        workspace,
+        reaches,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn price_optimal_paths_with_state<const RING: bool>(
+    combined: &[u8],
+    block: std::ops::Range<usize>,
+    options: EncodeOptions,
+    distance_size: usize,
+    prices: Option<&TokenPrices<'_>>,
+    runs: &[(u32, u32)],
+    starts: &[u32],
+    workspace: OptimalSlices<'_>,
+    reaches: &mut [(usize, usize, usize)],
+) {
     let start = block.start;
     let end = block.end;
     let span = end - start;
@@ -2310,6 +2499,21 @@ fn price_optimal_paths(
         arrive_reps,
         arrive_last_length,
     } = workspace;
+    let (arrive_reps, arrive_last_length, state_mask) = if RING {
+        // Prove both lengths once in this specialization. Constant masks then
+        // stay within these arrays without per-access dynamic length checks.
+        let fixed_reps: &mut [[u32; 4]; OPTIMAL_STATE_RING_SIZE] = arrive_reps
+            .try_into()
+            .expect("ring recent-distance storage has its planned length");
+        let fixed_last: &mut [u32; OPTIMAL_STATE_RING_SIZE] = arrive_last_length
+            .try_into()
+            .expect("ring last-length storage has its planned length");
+        let reps: &mut [[u32; 4]] = fixed_reps;
+        let last: &mut [u32] = fixed_last;
+        (reps, last, OPTIMAL_STATE_RING_SIZE - 1)
+    } else {
+        (arrive_reps, arrive_last_length, usize::MAX)
+    };
     // The first position past a match the parse committed to. Nothing is
     // priced from the positions before it. See [`NICE_MATCH_LENGTH`].
     let mut committed_through = 0usize;
@@ -2320,6 +2524,7 @@ fn price_optimal_paths(
         if index < committed_through {
             continue;
         }
+        let source_state = index & state_mask;
         // Every priced position extends a literal path to its successor;
         // a committed match skips only to an already priced endpoint. Blocks
         // are at most 1 MiB, so even all 15-bit literals stay below u32::MAX.
@@ -2328,14 +2533,35 @@ fn price_optimal_paths(
             prices.literal(combined[pos]) as u32
         });
         let literal = here.saturating_add(literal_cost);
+        let literal_state = (index + 1) & state_mask;
+        // A target at most 4096 ahead cannot alias this 8192-slot source. Keep
+        // its state across the literal write instead of loading it again.
+        let cached_reps = if RING {
+            arrive_reps[source_state]
+        } else {
+            [0; 4]
+        };
+        let cached_last = if RING {
+            arrive_last_length[source_state]
+        } else {
+            0
+        };
         if literal < price[index + 1] {
             price[index + 1] = literal;
             arrive_length[index + 1] = 0;
             arrive_distance[index + 1] = 0;
             // A literal emits no distance, so it leaves the remembered ones
             // exactly as it found them.
-            arrive_reps[index + 1] = arrive_reps[index];
-            arrive_last_length[index + 1] = arrive_last_length[index];
+            arrive_reps[literal_state] = if RING {
+                cached_reps
+            } else {
+                arrive_reps[source_state]
+            };
+            arrive_last_length[literal_state] = if RING {
+                cached_last
+            } else {
+                arrive_last_length[source_state]
+            };
         }
 
         let max_distance = pos.min(options.max_match_distance);
@@ -2344,9 +2570,19 @@ fn price_optimal_paths(
             continue;
         }
 
+        let state_reps = if RING {
+            cached_reps
+        } else {
+            arrive_reps[source_state]
+        };
+        let state_last = if RING {
+            cached_last
+        } else {
+            arrive_last_length[source_state]
+        };
         let state = EncoderMatchState {
-            reps: arrive_reps[index].map(|distance| distance as usize),
-            last_length: arrive_last_length[index] as usize,
+            reps: state_reps.map(|distance| distance as usize),
+            last_length: state_last as usize,
         };
 
         let mut reaches_len = 0;
@@ -2361,7 +2597,17 @@ fn price_optimal_paths(
             if repeat == 0 || repeat > max_distance {
                 continue;
             }
-            let length = match_length(combined, pos, repeat, max_length);
+            let length = if RING {
+                // Only matches of at least four bytes reach the price graph.
+                // Reject shorter repeats before calling the extension kernel;
+                // the guard above proves both prefixes and the suffix fit.
+                if combined[pos..pos + 4] != combined[pos - repeat..pos - repeat + 4] {
+                    continue;
+                }
+                4 + match_length(combined, pos + 4, repeat, max_length - 4)
+            } else {
+                match_length(combined, pos, repeat, max_length)
+            };
             if length >= 4 {
                 reaches[reaches_len] = (4, length, repeat);
                 reaches_len += 1;
@@ -2408,14 +2654,15 @@ fn price_optimal_paths(
                 if let Some(cost) = run_price.cost(reach) {
                     let reached = here.saturating_add(cost);
                     let target = index + reach;
+                    let target_state = target & state_mask;
                     if reached < price[target] {
                         price[target] = reached;
                         arrive_length[target] = reach as u32;
                         arrive_distance[target] = distance as u32;
                         let mut next = state;
                         next.remember(reach, distance);
-                        arrive_reps[target] = next.reps.map(|distance| distance as u32);
-                        arrive_last_length[target] = next.last_length as u32;
+                        arrive_reps[target_state] = next.reps.map(|distance| distance as u32);
+                        arrive_last_length[target_state] = next.last_length as u32;
                     }
                 }
                 length = reach + 1;
@@ -2486,15 +2733,19 @@ fn optimal_tokens_in_workspace<B: Budget>(
         arrive_reps,
         arrive_last_length,
     } = workspace;
+    #[cfg(feature = "experimental-ring-state")]
+    let state_length = (span + 1).min(OPTIMAL_STATE_RING_SIZE);
+    #[cfg(not(feature = "experimental-ring-state"))]
+    let state_length = span + 1;
     price.resize(span + 1, u32::MAX)?;
     price.fill(u32::MAX);
     arrive_length.resize(span + 1, 0)?;
     arrive_length.fill(0);
     arrive_distance.resize(span + 1, 0)?;
     arrive_distance.fill(0);
-    arrive_reps.resize(span + 1, [0; 4])?;
+    arrive_reps.resize(state_length, [0; 4])?;
     arrive_reps.fill([0; 4]);
-    arrive_last_length.resize(span + 1, 0)?;
+    arrive_last_length.resize(state_length, 0)?;
     arrive_last_length.fill(0);
     price[0] = 0;
 
@@ -2568,6 +2819,8 @@ fn encode_tokens_with_progress(
         MemberSearch::Fresh => Allowance::default(),
         MemberSearch::Lazy(finder) => finder.allowance().clone(),
         MemberSearch::Optimal(collector) => match &collector.finder {
+            #[cfg(feature = "experimental-ring-state")]
+            CollectorFinder::Packed(finder) => finder.allowance(),
             CollectorFinder::Tree(finder) => finder.allowance().clone(),
             CollectorFinder::Chains(finder) => finder.allowance().clone(),
         },
@@ -2598,7 +2851,22 @@ fn encode_tokens_with_allowance<B: Budget>(
     let start = block.start;
     let end = block.end;
     if options.optimal_parse {
+        #[cfg(feature = "experimental-ring-state")]
+        let matches = match search {
+            MemberSearch::Optimal(collector) => {
+                collector.collect(combined, block.clone(), options)?
+            }
+            _ => {
+                // A fresh index has no continuation once this block's matches
+                // are collected. Drop it before allocating pricing workspace.
+                let mut own =
+                    OptimalCollector::with_allowance(combined, start, options, allowance)?;
+                own.collect(combined, block.clone(), options)?
+            }
+        };
+        #[cfg(not(feature = "experimental-ring-state"))]
         let mut own;
+        #[cfg(not(feature = "experimental-ring-state"))]
         let collector = match search {
             MemberSearch::Optimal(collector) => collector,
             _ => {
@@ -2606,6 +2874,7 @@ fn encode_tokens_with_allowance<B: Budget>(
                 &mut own
             }
         };
+        #[cfg(not(feature = "experimental-ring-state"))]
         let matches = collector.collect(combined, block.clone(), options)?;
         // The prices come from the Huffman tables, and the tables come from
         // the parse, so the first pass has to guess. Each pass after it prices
@@ -2818,6 +3087,7 @@ fn best_match<B: Budget>(
         return None;
     }
     let mut best = None;
+
     let mut checked = 0usize;
     for distance in state.reps {
         // Remembered matches were admitted under this same distance limit at
@@ -2833,29 +3103,32 @@ fn best_match<B: Budget>(
             return Some(best);
         }
     }
-    let mut candidate = finder.first(input, pos);
-    while candidate != match_finder::NO_POSITION {
-        let distance = pos - candidate;
-        if distance > max_distance {
-            break;
-        }
-        checked += 1;
-        // A candidate can only improve on the current best when it matches at
-        // least one byte past the best length, so probe that byte first.
-        let best_length = best.map_or(0, |best: MatchCandidate| best.length);
-        if best_length == 0 || input[candidate + best_length] == input[pos + best_length] {
-            let length = match_length(input, pos, distance, max_length);
-            consider_match_candidate(&mut best, state, distance_size, length, distance);
-        }
-        if let Some(best) = best {
-            if best.length == max_length || best.length >= NICE_MATCH_LENGTH {
+
+    {
+        let mut candidate = finder.first(input, pos);
+        while candidate != match_finder::NO_POSITION {
+            let distance = pos - candidate;
+            if distance > max_distance {
                 break;
             }
+            checked += 1;
+            // A candidate can only improve on the current best when it matches at
+            // least one byte past the best length, so probe that byte first.
+            let best_length = best.map_or(0, |best: MatchCandidate| best.length);
+            if best_length == 0 || input[candidate + best_length] == input[pos + best_length] {
+                let length = match_length(input, pos, distance, max_length);
+                consider_match_candidate(&mut best, state, distance_size, length, distance);
+            }
+            if let Some(best) = best {
+                if best.length == max_length || best.length >= NICE_MATCH_LENGTH {
+                    break;
+                }
+            }
+            if checked >= options.max_match_candidates {
+                break;
+            }
+            candidate = finder.previous(candidate);
         }
-        if checked >= options.max_match_candidates {
-            break;
-        }
-        candidate = finder.previous(candidate);
     }
     best
 }

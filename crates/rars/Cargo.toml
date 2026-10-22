@@ -21,6 +21,8 @@ all-features = true
 [features]
 # Default builds retain all capabilities; each optional feature is independent.
 default = ["write", "parallel", "recovery", "encryption"]
+# Opt-in exact packed matching and bounded recent-distance pricing storage.
+experimental-ring-state = ["write"]
 parallel = ["dep:rayon"]
 recovery = ["dep:getrandom"]
 write = ["dep:getrandom"]

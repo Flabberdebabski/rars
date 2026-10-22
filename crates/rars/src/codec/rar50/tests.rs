@@ -516,16 +516,11 @@ fn large_member_search_setup_failures_release_the_allowance() {
 fn optimal_parse_pass_failures_release_the_allowance() {
     let data: Vec<u8> = (0..512).map(|i| (i * 71) as u8).collect();
     let options = EncodeOptions::new(16).with_optimal_parse(true);
-    // The first limit fails while building the initial optimal path; the
-    // second permits that path but fails while repricing it.
-    for limit in [1_080_000, 1_105_000] {
-        let allowance = Allowance::limited(limit);
-        assert!(matches!(
-            encode_member_with_allowance(&data, &[], 0, options, None, &allowance),
-            Err(Error::WorkspaceLimitExceeded(_))
-        ));
-        assert_eq!(allowance.used(), 0);
-    }
+    // Refuse each reached allocation, including the first path and repricing,
+    // independently of whether the finder remains live during those passes.
+    assert_each_allocation_refusal(|budget| {
+        encode_member_with_allowance(&data, &[], 0, options, None, budget)
+    });
 }
 
 #[test]
@@ -1205,14 +1200,35 @@ fn parser_refusal_and_cancellation_release_finders_matches_and_parse_arrays() {
             assert_eq!(allowance.used(), 0);
         }
         if optimal {
-            // Admit the tree itself, then refuse match/parse workspace.
+            // Admit the finder, then refuse later match/parse allocations.
+            // Exercise the real budget error as well as injected failures.
             let allowance = Allowance::limited(1_200_000);
-            assert!(
-                matches!(encode_tokens_with_allowance(&data, 0..data.len(), MemberSearch::Fresh,
-                options, DISTANCE_TABLE_SIZE_50, &[], None, &allowance),
-                Err(Error::WorkspaceLimitExceeded(details)) if details.used > 1_000_000)
-            );
+            assert!(matches!(
+                encode_tokens_with_allowance(
+                    &data,
+                    0..data.len(),
+                    MemberSearch::Fresh,
+                    options,
+                    DISTANCE_TABLE_SIZE_50,
+                    &[],
+                    None,
+                    &allowance,
+                ),
+                Err(Error::WorkspaceLimitExceeded(details)) if details.used > 1_000_000
+            ));
             assert_eq!(allowance.used(), 0);
+            assert_each_allocation_refusal(|budget| {
+                encode_tokens_with_allowance(
+                    &data,
+                    0..data.len(),
+                    MemberSearch::Fresh,
+                    options,
+                    DISTANCE_TABLE_SIZE_50,
+                    &[],
+                    None,
+                    budget,
+                )
+            });
         }
         let allowance = Allowance::limited(16 * 1024 * 1024);
         assert!(matches!(
@@ -2407,7 +2423,7 @@ fn cost_aware_match_selection_prefers_repeat_distance_token() {
     input[pos..pos + 8].copy_from_slice(pattern);
     input[pos + 8] = b'X';
 
-    let mut finder = Rar50MatchFinder::new(input.len());
+    let mut finder = test_match_finder(input.len());
     for candidate in 0..pos {
         finder.insert(&input, candidate);
     }
@@ -2442,7 +2458,7 @@ fn lazy_parser_uses_match_cost_not_only_match_length() {
     input[pos - 30] = b'x';
     input[pos..pos + 9].copy_from_slice(b"ABCDEFGHI");
 
-    let mut finder = Rar50MatchFinder::new(input.len());
+    let mut finder = test_match_finder(input.len());
     for candidate in 0..pos {
         finder.insert(&input, candidate);
     }
@@ -2483,7 +2499,7 @@ fn lazy_parser_uses_bounded_cost_lookahead() {
     input[pos - 80..pos - 70].copy_from_slice(b"CDEFGHIJKL");
     input[pos..pos + 12].copy_from_slice(b"ABCDEFGHIJKL");
 
-    let mut finder = Rar50MatchFinder::new(input.len());
+    let mut finder = test_match_finder(input.len());
     for candidate in 0..pos {
         finder.insert(&input, candidate);
     }
@@ -2534,7 +2550,7 @@ fn lazy_parser_charges_for_skipped_literals() {
     input[pos - 80..pos - 71].copy_from_slice(b"CDEFGHIJK");
     input[pos..pos + 12].copy_from_slice(b"ABCDEFGHIJKL");
 
-    let mut finder = Rar50MatchFinder::new(input.len());
+    let mut finder = test_match_finder(input.len());
     for candidate in 0..pos {
         finder.insert(&input, candidate);
     }
@@ -2579,7 +2595,7 @@ fn lazy_parser_charges_for_skipped_literals() {
 #[test]
 fn lazy_match_lookahead_stops_at_the_member_boundary() {
     let input = b"abcdef";
-    let mut finder = Rar50MatchFinder::new(input.len());
+    let mut finder = test_match_finder(input.len());
     for pos in 0..4 {
         finder.insert(input, pos);
     }

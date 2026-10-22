@@ -182,3 +182,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Test the library without workspace feature unification
         run: python3 scripts/check-unit-features.py --features '${{ matrix.features }}'
+      - name: Test the experimental exact encoder
+        if: matrix.features == 'write'
+        run: cargo test -p rars --lib --locked --no-default-features --features experimental-ring-state
