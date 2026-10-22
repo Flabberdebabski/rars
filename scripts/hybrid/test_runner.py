@@ -137,6 +137,29 @@ class RunnerTests(unittest.TestCase):
             self.freeze()
         self.assertFalse(self.run.exists())
 
+    def test_smoke_refuses_comparison_controls_before_staging(self):
+        self.experiment = "smoke"
+        with self.assertRaisesRegex(runner.RunError, "smoke uses only rars"):
+            self.freeze()
+        self.assertFalse(self.run.exists())
+        for options in ({"native_add": ["-mc-"]}, {"native_read": ["-idq"]}):
+            plan = self.root / "plan.json"
+            runner.write_json(plan, {"worker_options": options})
+            args = argparse.Namespace(output=self.run, corpus=self.manifest, plan=plan,
+                profile=["desktop"], experiment="smoke", inventory=None, rars=self.fake,
+                baseline=None, native_rar=None, repository=self.repository, seed=47)
+            with self.subTest(options=options), self.assertRaisesRegex(runner.RunError, "no native encoder or decoder"):
+                runner.freeze(args)
+            self.assertFalse(self.run.exists())
+
+    def test_comparison_still_requires_native_rar(self):
+        args = argparse.Namespace(output=self.run, corpus=self.manifest, plan=None,
+            profile=["desktop"], experiment="controls", inventory=None, rars=self.fake,
+            baseline=None, native_rar=None, repository=self.repository, seed=47)
+        with self.assertRaisesRegex(runner.RunError, "require --native-rar"):
+            runner.freeze(args)
+        self.assertFalse(self.run.exists())
+
     def test_controls_freeze_fixed_dictionary_and_filters_for_every_role(self):
         self.experiment = "controls"
         m = self.freeze(fixed_dictionary_bytes=4 * 1024**2,

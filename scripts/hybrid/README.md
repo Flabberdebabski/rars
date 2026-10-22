@@ -2,8 +2,8 @@
 
 This POSIX Python 3.9+ runner executes a finite experiment without building or
 changing source, calling an AI service, or discovering remote hosts. It requires
-an already-built ordinary `rars` and a licensed native RAR executable. The
-default compares those two encoders, with one configuration per resource
+an already-built ordinary `rars`; comparison experiments also require a licensed
+native RAR executable. The default compares those two encoders, with one configuration per resource
 profile. It runs against the current CLI without any hybrid encoder changes.
 An optional `--baseline` adds a separate ordinary-rars executable, for example
 a previous release. The 64-way hybrid matrix remains available only through
@@ -11,6 +11,12 @@ a previous release. The 64-way hybrid matrix remains available only through
 It reports measurements and verified Pareto candidates;
 it does not assert native parity or apply a size-percentage or archive-byte
 identity acceptance rule.
+
+`--experiment smoke` runs only ordinary rars creation, integrity testing and
+extraction through the same frozen worker and receipts. It requires no native
+RAR executable and does not select finalists, run confirmation, rank encoders or
+establish cross-decoder interoperability. Native, baseline and cold-extraction
+controls are refused in this mode.
 
 Local and SSH workers support macOS, Linux and FreeBSD with compatible frozen
 executables. Peak RSS uses macOS byte units and converts Linux/FreeBSD KiB units
@@ -268,8 +274,43 @@ Run the mechanical tests, including fake executable smoke, with:
 python3 -m unittest discover -s scripts/hybrid -v
 ```
 
-
 The unit tests use fake archive executables to prove scheduling, command and
 verification behavior. They do not establish native RAR interoperability or
-performance. Run with supplied real binaries to collect that evidence; no
-campaign starts at installation or test time.
+performance. Real-binary integration tests skip explicitly when their executable
+dependencies are unavailable. To run them from a **clean committed checkout**:
+
+```sh
+cargo build -p rars-cli --locked
+RARS_SMOKE_BINARY="$PWD/target/debug/rars" \
+  python3 -m unittest discover -s scripts/hybrid -v
+```
+
+The bounded rars integration test uses two tiny workloads and pauses after one
+task, resumes the frozen worker, and checks that the first completed receipt and
+artifacts are unchanged. It checks real RAR archive bytes, integrity testing,
+extraction, file content, POSIX permissions, whole-second modification times and
+an explicit empty directory. It retains the runner's executable/source hashes,
+deterministic task IDs and receipts, one-thread desktop resource settings, and
+short frozen task and aggregate budgets. This is correctness smoke coverage;
+it does not run a performance campaign or the 15-repetition confirmation phase.
+
+For the complete two-encoder smoke and both decoders on each encoder's archive,
+supply a licensed native RAR executable with `RARS_NATIVE_RAR=/absolute/path/to/rar`
+alongside `RARS_SMOKE_BINARY`. Otherwise the test looks for `rar` on `PATH`; a
+missing native encoder is an explicit skip. `unrar` is not an encoder substitute,
+and simulated ZIP fixtures never count as native execution. The Linux CI job
+builds rars and runs the suite with `RARS_SMOKE_BINARY`; native coverage depends
+on an available licensed native binary.
+
+For an operator-supplied corpus, initialize the same self-roundtrip mode, then
+repeat the frozen-worker command to resume at the next task:
+
+```sh
+python3 scripts/hybrid_candidates.py init --experiment smoke \
+  --rars /absolute/path/to/rars --corpus /path/to/manifest.json \
+  --output /path/to/run
+python3 /path/to/run/frozen/hybrid_candidates.py run /path/to/run --max-tasks 1
+```
+
+A plan can reduce `task_timeout_seconds` and `budgets.screen` as documented
+above. No campaign starts at installation time.

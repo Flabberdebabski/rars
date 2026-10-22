@@ -116,8 +116,8 @@ def choices(variant):
 def configs(profiles, experiment="hybrid"):
     if not profiles or len(set(profiles)) != len(profiles) or set(profiles) - set(PROFILES):
         raise RunError("profiles must be distinct desktop/server values")
-    if experiment not in ("controls", "hybrid"):
-        raise RunError("experiment must be controls or hybrid")
+    if experiment not in ("controls", "hybrid", "smoke"):
+        raise RunError("experiment must be controls, hybrid or smoke")
     variants = range(64) if experiment == "hybrid" else (0,)
     return [{"id": f"{profile}-{variant:02d}", "profile": profile,
              "variant": variant, "choices": choices(variant)}
@@ -285,6 +285,11 @@ def freeze(args):
     if not math.isfinite(timeout) or timeout <= 0:
         raise RunError("task timeout must be finite and positive")
     cold = plan.get("cold_prepare")
+    if experiment == "smoke":
+        if args.native_rar or args.baseline or cold is not None:
+            raise RunError("smoke uses only rars; native, baseline and cold controls require a comparison experiment")
+    elif args.native_rar is None:
+        raise RunError("comparison experiments require --native-rar (licensed native RAR)")
     if cold is not None:
         if (not isinstance(cold, list) or not cold
                 or not all(isinstance(arg, str) and "\0" not in arg for arg in cold)):
@@ -300,6 +305,8 @@ def freeze(args):
     if set(options) - allowed or any(not isinstance(v, list) or not all(isinstance(x, str) for x in v)
                                      for v in options.values()):
         raise RunError("worker_options must contain documented arrays of argument strings")
+    if experiment == "smoke" and any(options.get(key) for key in ("native_add", "native_read")):
+        raise RunError("smoke has no native encoder or decoder for native worker options")
     # The matrix owns these switches, to prevent silently relabelled bit choices.
     for channel, flags in options.items():
         for flag in flags:
@@ -327,7 +334,9 @@ def freeze(args):
         (destination / "frozen/bin").mkdir(parents=True)
         (destination / "frozen/input").mkdir()
         binaries = {}
-        for role, path in (("candidate", args.rars), ("baseline", args.baseline or args.rars), ("native", args.native_rar)):
+        supplied = [("candidate", args.rars)] if experiment == "smoke" else [
+            ("candidate", args.rars), ("baseline", args.baseline or args.rars), ("native", args.native_rar)]
+        for role, path in supplied:
             path = path.resolve()
             target = destination / "frozen/bin" / role
             shutil.copy2(path, target)
@@ -403,16 +412,16 @@ def freeze(args):
         manifest = {"schema": SCHEMA, "source": source_identity,
                     "experiment": experiment, "capability_preflight": preflight,
                     "fixed_dictionary_bytes": dictionary,
-                    "sample_roles": ["native", "baseline", "candidate", "relationships", "streams"] if experiment == "hybrid" else ["native", "candidate"] + (["baseline"] if args.baseline else []),
+                    "sample_roles": ["candidate"] if experiment == "smoke" else ["native", "baseline", "candidate", "relationships", "streams"] if experiment == "hybrid" else ["native", "candidate"] + (["baseline"] if args.baseline else []),
                     "invalid_combinations": invalid,
                     "seed": int(args.seed), "profiles": profiles,
                     "host_platform": {"system": platform.system(), "machine": platform.machine(), "python": platform.python_version(), "logical_cpus": os.cpu_count()}, "configurations": matrix,
                     "cases": cases, "hosts": hosts, "budgets": budgets, "execution": execution,
                     "cold_prepare": {"binary": "cold_prepare", "arguments": cold[1:]} if cold is not None else None,
                     "task_timeout_seconds": timeout, "worker_options": options,
-                    "confirmation_repetitions": REPETITIONS, "max_finalists_per_profile": 3,
-                    "promotion_control": "native; all four ranking metrics are within-task candidate/native ratios",
-                    "control_roles": ["native", "baseline", "relationships", "streams", "native_ordered"] if experiment == "hybrid" else ["native"] + (["baseline"] if args.baseline else []),
+                    "confirmation_repetitions": 0 if experiment == "smoke" else REPETITIONS, "max_finalists_per_profile": 0 if experiment == "smoke" else 3,
+                    "promotion_control": None if experiment == "smoke" else "native; all four ranking metrics are within-task candidate/native ratios",
+                    "control_roles": [] if experiment == "smoke" else ["native", "baseline", "relationships", "streams", "native_ordered"] if experiment == "hybrid" else ["native"] + (["baseline"] if args.baseline else []),
                     "native_ordered_scope": "ordering-assisted native compression using the verified candidate member order and -ds; distinct from ordinary native control" if experiment == "hybrid" else None,
                     "screen_repetitions": 1, "binaries": binaries,
                     "corpus_manifest_sha256": sha(source), "corpus_source": str(source),
@@ -445,7 +454,11 @@ def load(run):
         expected = {profile: control_settings(profile, case, dictionary) for profile in m["profiles"]}
         if case["control_settings"] != expected:
             raise RunError("control resources differ from the frozen dictionary selection")
-    if m["confirmation_repetitions"] != 15 or m["max_finalists_per_profile"] != 3:
+    smoke = m.get("experiment") == "smoke"
+    if smoke and (set(m["binaries"]) != {"candidate"} or m["sample_roles"] != ["candidate"]
+                  or m["control_roles"] or m["cold_prepare"] is not None or m["promotion_control"] is not None):
+        raise RunError("smoke must retain candidate-only execution without comparison controls")
+    if m["confirmation_repetitions"] != (0 if smoke else 15) or m["max_finalists_per_profile"] != (0 if smoke else 3):
         raise RunError("confirmation contract changed")
     for b in m["binaries"].values():
         if sha(run / b["path"]) != b["sha256"]:
@@ -513,6 +526,8 @@ def host_for(m, task):
 
 
 def tasks(m, phase, finalists=None):
+    if m.get("experiment") == "smoke" and phase == "confirm":
+        return []
     selections = m["configurations"] if phase == "screen" else [c for c in m["configurations"] if c["id"] in finalists]
     rng = random.Random(m["seed"] + (0 if phase == "screen" else 1))
     if phase == "screen":
@@ -641,7 +656,7 @@ def compression_command(m, run, role, configuration, case, archive, member_order
     variant = configuration["variant"] & 15 if role == "streams" else configuration["variant"]
     result = [binary, "--threads", str(threads), "--progress", "never", "a", "--format", "rar50", "--level", "3",
               "--memory-limit", str(settings["memory_limit_bytes"]), "--max-memory", str(settings["memory_limit_bytes"])]
-    ordinary = role == "baseline" or m.get("experiment") == "controls"
+    ordinary = role == "baseline" or m.get("experiment") in ("controls", "smoke")
     if ordinary:
         result.extend(["--dict-size", str(settings["dictionary_bytes"])])
     if case["solid"]:
@@ -730,12 +745,15 @@ def run_role(run, m, task, configuration, case, area, deadline, env, result, rol
     data = {"encode": encoded, "archive_bytes": archive.stat().st_size,
             "archive_sha256": sha(archive, deadline), "decoders": {}}
     result["roles"][role] = data
-    native_binary = str(run / m["binaries"]["native"]["path"])
-    execute([native_binary, "lt", "-p-", str(archive)], area, area,
+    smoke = m.get("experiment") == "smoke"
+    metadata_binary = str(run / m["binaries"]["candidate" if smoke else "native"]["path"])
+    metadata_command = [metadata_binary, "info", str(archive)] if smoke else [metadata_binary, "lt", "-p-", str(archive)]
+    execute(metadata_command, area, area,
             role + "-actual-archive-metadata", deadline, env)
     data["actual_archive_metadata"] = role + "-actual-archive-metadata.stdout"
-    data["format_scope"] = "native metadata retained verbatim; -ma5 does not imply a particular RAR5 compression algorithm version"
-    for decoder in ("native", "candidate"):
+    data["format_scope"] = "rars self-roundtrip only; native RAR and cross-decoder verification unavailable" if smoke else "native metadata retained verbatim; -ma5 does not imply a particular RAR5 compression algorithm version"
+    decoders = ("candidate",) if smoke else ("native", "candidate")
+    for decoder in decoders:
         binary = str(run / m["binaries"][decoder]["path"])
         target = area / (role + "-by-" + decoder)
         target.mkdir()
@@ -760,8 +778,8 @@ def run_role(run, m, task, configuration, case, area, deadline, env, result, rol
                                       "cold_requested": False, "verification_receipt": proof_path.name,
                                       "verification_sha256": sha(proof_path, deadline),
                                       "successful_tree_removed": True}
-    data["temporary_output_bytes"] = data["archive_bytes"] + 2 * sum(x.get("bytes", 0) for x in case["members"].values())
-    data["temporary_io_scope"] = "materialized archive plus two extracted regular-file trees; not a kernel I/O byte counter or transient peak"
+    data["temporary_output_bytes"] = data["archive_bytes"] + len(decoders) * sum(x.get("bytes", 0) for x in case["members"].values())
+    data["temporary_io_scope"] = f"materialized archive plus {len(decoders)} extracted regular-file trees; not a kernel I/O byte counter or transient peak"
     data["cold_selective"] = cold_selective(run, m, task, case, area, archive, role, data["archive_sha256"], deadline, env)
     if data["cold_selective"] and data["cold_selective"]["available"]:
         data["temporary_output_bytes"] += case["members"][data["cold_selective"]["requested_member"]]["bytes"]
@@ -858,6 +876,8 @@ def aggregate(samples, relative=False):
 
 
 def choose_finalists(run, m, rows):
+    if m.get("experiment") == "smoke":
+        raise RunError("smoke does not rank or confirm comparison finalists")
     samples = verified_results(run, rows, "screen")
     grouped = {}
     for row in samples:
@@ -1048,7 +1068,7 @@ def worker(run, host_id, max_tasks=None):
     with locked(lock, blocking=False):
         if any(r.get("control_failure") for r in journal(run)):
             raise RunError("a retained control failure blocks this run; use a new frozen run after repairing its cause")
-        for phase in ("screen", "confirm"):
+        for phase in (("screen",) if m.get("experiment") == "smoke" else ("screen", "confirm")):
             if phase == "screen" and m.get("execution", {}).get("parallel_screening") and host.get("screening_slots", 1) > 1:
                 result = parallel_screen(run, m, host, None if max_tasks is None else max_tasks - count)
                 count += result["tasks_run"]
@@ -1180,10 +1200,14 @@ def report(run):
     events = list(latest(rows).values())
     result = {"experiment": m.get("experiment", "hybrid"), "manifest_sha256": sha(run / "manifest.json"), "execution": execution_settings(m.get("execution")), "tasks": {name: sum(x["event"] == name for x in events) for name in ("started", "complete", "failed", "excluded")},
               "budget_seconds": {phase: {h["id"]: {"charged": consumed(rows, phase, h["id"]), "remaining": available(m, rows, phase, h["id"])} for h in m["hosts"]} for phase in BUDGETS},
-              "selection": read_json(run / "selection.json") if (run / "selection.json").exists() else None,
+              "selection": read_json(run / "selection.json") if m.get("experiment") != "smoke" and (run / "selection.json").exists() else None,
               "predeclared_invalid_combinations": m.get("invalid_combinations", []),
-              "absolute_screen_frontiers": absolute_frontiers(verified_results(run, rows, "screen")),
+              "absolute_screen_frontiers": {} if m.get("experiment") == "smoke" else absolute_frontiers(verified_results(run, rows, "screen")),
               "scope": "Parallel screening timings are contention affected diagnostics. Only serial, exclusive confirmation can qualify finalists. Partial runs and failed/incomplete confirmations are not qualified. No byte identity, size percentage or native-parity acceptance is inferred."}
+    if m.get("experiment") == "smoke":
+        verified_results(run, rows, "screen")
+        result.update(selection=None, qualified_finalists={}, scope="rars self-roundtrip smoke only; no native encoder, cross-decoder verification, ranking or performance qualification")
+        return result
     confirmations = verified_results(run, rows, "confirm")
     grouped = {}
     for item in confirmations:
@@ -1337,13 +1361,13 @@ def dispatch(run):
         if host["kind"] == "ssh":
             return {"host": host["id"], **dispatch_ssh(run, host)}
         return {"host": host["id"], "status": "export-worker and import-results required; no undisclosed SSH destination"}
-    for _ in range(2):  # screen/merge, then frozen confirmation/merge
+    for _ in range(1 if m.get("experiment") == "smoke" else 2):  # screen/merge, then frozen confirmation/merge
         # Each physical host retains its own worker lock and budget. Join the
         # entire phase before selection, retaining inventory order in receipts.
         with ThreadPoolExecutor(max_workers=len(m["hosts"])) as pool:
             responses.extend(pool.map(dispatch_host, m["hosts"]))
         rows = journal(run)
-        if {r["host"] for r in rows if r.get("event") == "phase-done" and r.get("phase") == "screen"} == {h["id"] for h in m["hosts"]}:
+        if m.get("experiment") != "smoke" and {r["host"] for r in rows if r.get("event") == "phase-done" and r.get("phase") == "screen"} == {h["id"] for h in m["hosts"]}:
             if not (run / "selection.json").exists():
                 write_json(run / "selection.json", choose_finalists(run, m, rows))
     return {"workers": responses, "summary": report(run)}
@@ -1356,9 +1380,9 @@ def main(argv=None):
     init.add_argument("--output", type=Path, required=True)
     init.add_argument("--rars", type=Path, required=True)
     init.add_argument("--baseline", type=Path, help="optional separate ordinary-rars control binary")
-    init.add_argument("--experiment", choices=("controls", "hybrid"), default="controls",
-                      help="controls: ordinary rars/native comparison (default); hybrid: external experimental binary required")
-    init.add_argument("--native-rar", type=Path, required=True)
+    init.add_argument("--experiment", choices=("controls", "hybrid", "smoke"), default="controls",
+                      help="controls: ordinary rars/native comparison (default); hybrid: external experimental binary required; smoke: rars self-roundtrip only, no ranking")
+    init.add_argument("--native-rar", type=Path, help="licensed native RAR; required except for smoke")
     init.add_argument("--corpus", type=Path, required=True)
     init.add_argument("--profile", choices=PROFILES, action="append")
     init.add_argument("--repository", type=Path, default=ROOT)
