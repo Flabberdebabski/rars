@@ -72,6 +72,13 @@ jobs:
       - name: Tests
         run: cargo test --workspace --locked
 
+      - name: Frozen runner real-binary smoke and portable checks
+        env:
+          RARS_SMOKE_BINARY: ${{ github.workspace }}/target/debug/rars
+        run: |
+          cargo build -p rars-cli --locked
+          python3 -m unittest discover -s scripts/hybrid -v
+
   native-cli:
     name: Native CLI (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
