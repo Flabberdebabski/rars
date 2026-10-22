@@ -165,9 +165,7 @@ impl<const MIN_MATCH: usize, B: Budget> MatchFinder<MIN_MATCH, B> {
     }
 }
 
-// Keep the original callers unchanged; the ring experiment fuses the raw
-// chain collector so insertion and lookup share one hash and skip its self link.
-#[cfg(any(test, feature = "experimental-ring-state"))]
+// Fusing insertion and lookup shares one hash and skips the self link.
 impl<B: Budget> MatchFinder<4, B> {
     /// Insert a readable position and return its first older candidate. Like
     /// the encoder's ordinary insertion schedule, positions arrive in order.
@@ -393,16 +391,10 @@ impl<B: Budget> TreeMatchFinder<B> {
         cut: usize,
         out: &mut Buffer<(u32, u32), B>,
     ) -> std::result::Result<(), B::Failure> {
-        self.matches_with_extension::<{ cfg!(feature = "experimental-ring-state") }>(
-            input,
-            pos,
-            len_limit,
-            max_distance,
-            cut,
-            out,
-        )
+        self.matches_with_extension::<true>(input, pos, len_limit, max_distance, cut, out)
     }
 
+    // The scalar specialization is retained for differential tests only.
     fn matches_with_extension<const FAST: bool>(
         &mut self,
         input: &[u8],
