@@ -196,6 +196,150 @@ fn prepared_pricing_preserves_all_paths_and_remembered_state() {
     }
 }
 
+#[test]
+#[cfg(feature = "experimental-ring-state")]
+fn ring_state_preserves_full_backtrace_endpoint_and_three_pricing_passes() {
+    let span = 3 * OPTIMAL_STATE_RING_SIZE + 257;
+    let mut random = 0xA17E_3B29u32;
+    let mut mixed: Vec<_> = (0..span)
+        .map(|_| {
+            random = random.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (random >> 28) as u8
+        })
+        .collect();
+    // A maximum-length match straddles a ring boundary and commits across
+    // positions that may already have finite incoming prices.
+    mixed.copy_within(0..MAX_ENCODER_MATCH_LENGTH, OPTIMAL_STATE_RING_SIZE - 2);
+    let allowance = Allowance::default();
+    let options = EncodeOptions::new(16).with_optimal_parse(true);
+    for data in [vec![0; span], mixed] {
+        let block = 0..data.len();
+        let mut collector = OptimalCollector::new(&data, 0, options);
+        let matches = collector.collect(&data, block.clone(), options).unwrap();
+        assert!(matches
+            .runs
+            .iter()
+            .any(|&(length, _)| length as usize == MAX_ENCODER_MATCH_LENGTH));
+        let capacity = matches
+            .starts
+            .windows(2)
+            .map(|pair| (pair[1] - pair[0]) as usize)
+            .max()
+            .unwrap_or(0)
+            + 4;
+        let mut workspace = OptimalWorkspace::new(&allowance);
+        let mut previous_lengths: Option<OwnedLengths> = None;
+        for _ in 0..OPTIMAL_PARSE_PASSES {
+            let actual_prices = previous_lengths.as_ref().map(|lengths| TokenPrices {
+                lengths: lengths.slices(),
+            });
+            let prices = actual_prices.as_ref();
+            let mut expected = Paths::new(span);
+            let mut reaches = vec![(0, 0, 0); capacity];
+            reference_price_optimal_paths(
+                &data,
+                block.clone(),
+                options,
+                DISTANCE_TABLE_SIZE_50,
+                prices,
+                &matches.runs,
+                &matches.starts,
+                expected.slices(),
+                &mut reaches,
+            );
+            let tokens = optimal_tokens_in_workspace(
+                &data,
+                block.clone(),
+                options,
+                DISTANCE_TABLE_SIZE_50,
+                prices,
+                &matches,
+                &mut workspace,
+            )
+            .unwrap();
+            assert_eq!(&workspace.arrive_length[..], &expected.length);
+            assert_eq!(&workspace.arrive_distance[..], &expected.distance);
+            assert_eq!(&workspace.price[..], &expected.price);
+            assert_eq!(workspace.arrive_reps.len(), OPTIMAL_STATE_RING_SIZE);
+            assert_eq!(workspace.arrive_last_length.len(), OPTIMAL_STATE_RING_SIZE);
+            let endpoint = span & (OPTIMAL_STATE_RING_SIZE - 1);
+            assert_eq!(workspace.arrive_reps[endpoint], expected.reps[span]);
+            assert_eq!(
+                workspace.arrive_last_length[endpoint],
+                expected.last_length[span]
+            );
+
+            let mut expected_tokens = Vec::new();
+            let mut index = span;
+            while index != 0 {
+                let length = expected.length[index] as usize;
+                if length == 0 {
+                    expected_tokens.push(EncodeToken::Literal(data[index - 1]));
+                    index -= 1;
+                } else {
+                    expected_tokens.push(EncodeToken::Match {
+                        length,
+                        distance: expected.distance[index] as usize,
+                    });
+                    index -= length;
+                }
+            }
+            expected_tokens.reverse();
+            assert_eq!(&tokens[..], &expected_tokens);
+            previous_lengths =
+                Some(table_lengths_for_tokens(&tokens, DISTANCE_TABLE_SIZE_50).unwrap());
+        }
+    }
+}
+
+#[test]
+#[cfg(feature = "experimental-ring-state")]
+fn ring_state_allocation_refusal_and_cancellation_release_every_owner() {
+    use crate::codec::workspace::RefusingBudget;
+    let data = vec![0; 2 * OPTIMAL_STATE_RING_SIZE + 128];
+    let options = EncodeOptions::new(16).with_optimal_parse(true);
+    let run = |budget: &RefusingBudget| {
+        encode_tokens_with_allowance(
+            &data,
+            0..data.len(),
+            MemberSearch::Fresh,
+            options,
+            DISTANCE_TABLE_SIZE_50,
+            &[],
+            None,
+            budget,
+        )
+    };
+    let baseline = RefusingBudget::new(usize::MAX);
+    drop(run(&baseline).unwrap());
+    let attempts = baseline.attempts();
+    assert!(attempts > 0);
+    assert_eq!(baseline.used(), 0);
+    for fail_at in 0..attempts {
+        let budget = RefusingBudget::new(fail_at);
+        assert!(
+            matches!(run(&budget), Err(Error::Cancelled)),
+            "allocation{fail_at}"
+        );
+        assert_eq!(budget.used(), 0, "allocation{fail_at}");
+    }
+    let allowance = Allowance::limited(16 * 1024 * 1024);
+    assert!(matches!(
+        encode_tokens_with_allowance(
+            &data,
+            0..data.len(),
+            MemberSearch::Fresh,
+            options,
+            DISTANCE_TABLE_SIZE_50,
+            &[],
+            Some(&mut |_| false),
+            &allowance,
+        ),
+        Err(Error::Cancelled)
+    ));
+    assert_eq!(allowance.used(), 0);
+}
+
 // Independent pre-hoisting implementation retained for differential checks.
 #[allow(clippy::too_many_arguments)]
 fn reference_price_optimal_paths(
