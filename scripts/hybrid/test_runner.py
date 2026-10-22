@@ -32,8 +32,9 @@ archive=next((Path(a) for a in args if a.endswith('.rar')),None)
 if archive is None: raise SystemExit(3)
 if 'a' in args:
     hybrid='--experimental-hybrid' in args
+    candidate=hybrid and args[args.index('--hybrid-architecture')+1]=='hybrid'
     if '--fail-native' in args:raise SystemExit(18)
-    if hybrid and '--fail-hybrid' in args: raise SystemExit(17)
+    if candidate and '--fail-hybrid' in args: raise SystemExit(17)
     metadata={}
     names=args[args.index(str(archive))+1:]
     paths=[]
@@ -44,7 +45,7 @@ if 'a' in args:
         for p in paths:
             s=p.stat();name=p.as_posix()
             mode=stat.S_IMODE(s.st_mode)
-            if hybrid and '--bad-hybrid-mode' in args and not p.is_dir(): mode^=0o100
+            if candidate and '--bad-hybrid-mode' in args and not p.is_dir(): mode^=0o100
             metadata[name]={'mode':mode,'mtime':int(s.st_mtime),'directory':p.is_dir()}
             if not p.is_dir():z.writestr(name,p.read_bytes())
         z.writestr('__fake_metadata',json.dumps(metadata))
@@ -469,9 +470,11 @@ class RunnerTests(unittest.TestCase):
     def test_cold_helper_mutation_failure_and_no_implicit_command(self):
         helper=self.cache_helper("raise SystemExit(7)")
         m=self.freeze(cold_prepare=[str(helper),"{archive}"])
-        runner.worker(self.run,"local",1)
+        with self.assertRaisesRegex(runner.RunError, "control failed"):
+            runner.worker(self.run,"local",1)
         row=next(iter(runner.latest(runner.journal(self.run)).values()))
         self.assertEqual(row["event"],"failed")
+        self.assertTrue(row["control_failure"])
         self.assertIn("cold-prepare exited 7",row["error"])
         area=self.run/"tasks"/row["task_id"]
         self.assertEqual(list(area.glob("*-cold-selective-extract.json")),[])
@@ -483,9 +486,11 @@ class RunnerTests(unittest.TestCase):
     def test_cold_preparation_cannot_change_archive(self):
         helper=self.cache_helper("import sys; from pathlib import Path; p=Path(sys.argv[1]); p.write_bytes(p.read_bytes()+b'changed')")
         self.freeze(cold_prepare=[str(helper),"{archive}"])
-        runner.worker(self.run,"local",1)
+        with self.assertRaisesRegex(runner.RunError, "control failed"):
+            runner.worker(self.run,"local",1)
         row=next(iter(runner.latest(runner.journal(self.run)).values()))
         self.assertEqual(row["event"],"failed")
+        self.assertTrue(row["control_failure"])
         self.assertIn("preparation changed the measured archive",row["error"])
         area=self.run/"tasks"/row["task_id"]
         self.assertTrue(any(p.is_dir() for p in area.glob("*-cold-selective")))

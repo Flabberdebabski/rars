@@ -58,3 +58,10 @@ class SshRecoveryTests(unittest.TestCase):
         runner.write_json(self.run / "selection.json", {**selection, "finalists": ["desktop-00"]})
         with self.assertRaisesRegex(runner.RunError, "conflicting frozen selection"):
             runner.import_results(other, self.run)
+
+    def test_identical_new_experiments_have_distinct_run_identity(self):
+        first = self.freeze()
+        self.run = self.root / "second-run"
+        second = self.freeze()
+        self.assertNotEqual(first["run_id"], second["run_id"])
+        self.assertEqual(runner.tasks(first, "screen"), runner.tasks(second, "screen"))

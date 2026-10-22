@@ -113,7 +113,12 @@ class ParallelScreenTests(unittest.TestCase):
         self.assertEqual(calls[0][1], calls[1][1])
         rows = runner.journal(self.run)
         self.assertEqual(len([r for r in rows if r.get("event") == "excluded"]), 4)
-        self.assertLess(runner.consumed(rows, "screen", "local"), .22)
+        # Scheduler and durable-journal latency are not bounded by the
+        # decoder deadline, especially on loaded or slow filesystems.
+        accounting = [row for row in rows if row.get("event") == "phase-accounting"]
+        self.assertEqual(len(accounting), 1)
+        self.assertEqual(runner.consumed(rows, "screen", "local"), accounting[0]["charged_seconds"])
+        self.assertGreaterEqual(accounting[0]["charged_seconds"], .12)
         self.assertEqual(runner.available(m, rows, "screen", "local"), 0)
 
     def test_interruption_cancels_jobs_and_charges_reservation_once(self):

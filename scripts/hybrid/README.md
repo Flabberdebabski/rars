@@ -115,7 +115,7 @@ recorded, not hidden. Task deadlines precede validation and are checked while ha
 extractions. Active phase wall time includes scheduling, journals, selection and
 correctness work. OS I/O blocking and process-termination latency cannot be
 preempted, so this is a cooperative budget, not a hard real-time guarantee.
-Interrupted tasks conservatively consume their full reservation. Failed or interrupted samples are not automatically retried.
+Interrupted tasks conservatively consume their full reservation. Failed or interrupted samples are not automatically retried. Phase-budget exhaustion and cancellation are recorded as interrupted; they do not imply corrupt inputs or a failed comparison control. Per-task timeouts remain failures and exclude the configuration under the configured failure policy. Incomplete configurations remain ineligible for promotion.
 Control failure stops the run; candidate failure excludes that configuration by
 default. Set `execution.screen_failure_policy` to `"workload"` to retain a failed
 screening task and continue that configuration's other workloads. Such partial
@@ -264,7 +264,7 @@ Only metadata/command receipts need returning alongside the frozen manifest and
 inputs; exported bundles retain these. Do not merge an active worker's directory.
 The controller waits for every worker's screen-phase boundary before selecting
 finalists. Re-export after selection to supply the immutable confirmation list.
-Transport failures retain remote state; task IDs and receipts prevent silently
+Transport failures retain a stable remote state directory for each frozen run. Each retry transfers fresh snapshots, merges monotonic journal progress and preserves outstanding budget reservations; task IDs and receipts prevent silently
 rerunning completed samples. Conflicting receipts, changed hashes and torn
 journal lines fail closed and preserve evidence for repair.
 

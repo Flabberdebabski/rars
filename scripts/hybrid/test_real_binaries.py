@@ -292,7 +292,7 @@ class RealBinaryTests(unittest.TestCase):
                 retained.update(self.assert_sample(row, roles, decoders))
         self.assert_frozen()
         status = self.cli(self.frozen_script, "status", self.run)
-        self.assertEqual(status["tasks"], {"started": 0, "complete": 2, "failed": 0, "excluded": 0})
+        self.assertEqual(status["tasks"], {"started": 0, "complete": 2, "failed": 0, "interrupted": 0, "excluded": 0})
         self.assertIsNone(status["selection"])
         self.assertFalse((self.run / "selection.json").exists())
         return retained

@@ -47,6 +47,19 @@ class RunError(Exception):
     pass
 
 
+class TaskInterrupted(RunError):
+    """A deadline or cancellation stopped work; no correctness failure is implied."""
+
+
+class TaskTimeout(RunError):
+    """The sample exhausted its own timeout, rather than the phase budget."""
+
+
+def deadline_error(message):
+    kind = TaskTimeout if getattr(EXECUTION_CONTEXT, "task_limited", False) else TaskInterrupted
+    return kind(message)
+
+
 class SampleError(RunError):
     def __init__(self, message, control_failure=False):
         super().__init__(message)
@@ -63,7 +76,7 @@ def digest(value):
 
 def check_deadline(deadline):
     if deadline is not None and time.monotonic() >= deadline:
-        raise RunError("task wall-clock reservation exhausted")
+        raise deadline_error("task wall-clock reservation exhausted")
 
 
 def sha(path, deadline=None):
@@ -410,7 +423,7 @@ def freeze(args):
         invalid = [{"configuration": c["id"], "case": case["id"],
                     "code": "solid-filter-unsupported", "reason": "solid output does not support requested automatic/mandatory filters; excluded before child launch"}
                    for c in matrix for case in cases if case["solid"] and (mandatory_filter(options) or c["choices"]["automatic_filters"])]
-        manifest = {"schema": SCHEMA, "source": source_identity,
+        manifest = {"schema": SCHEMA, "run_id": uuid.uuid4().hex, "source": source_identity,
                     "experiment": experiment, "capability_preflight": preflight,
                     "fixed_dictionary_bytes": dictionary,
                     "sample_roles": ["candidate"] if experiment == "smoke" else ["native", "baseline", "candidate", "relationships", "streams"] if experiment == "hybrid" else ["native", "candidate"] + (["baseline"] if args.baseline else []),
@@ -571,7 +584,7 @@ def available(m, rows, phase, host):
 def execute(command, cwd, area, label, deadline, environment):
     left = deadline - time.monotonic()
     if left <= 0:
-        raise RunError("task wall-clock reservation exhausted")
+        raise deadline_error("task wall-clock reservation exhausted")
     stdout, stderr = area / (label + ".stdout"), area / (label + ".stderr")
     start = time.monotonic()
     with stdout.open("wb") as out, stderr.open("wb") as err:
@@ -582,7 +595,7 @@ def execute(command, cwd, area, label, deadline, environment):
             while True:
                 cancellation = getattr(EXECUTION_CONTEXT, "cancellation", None)
                 if cancellation is not None and cancellation.is_set():
-                    raise RunError("parallel screening cancelled")
+                    raise TaskInterrupted("parallel screening cancelled")
                 pid, status, usage = os.wait4(process.pid, os.WNOHANG)
                 if pid:
                     break
@@ -613,8 +626,10 @@ def execute(command, cwd, area, label, deadline, environment):
               "io_bytes": None, "io_scope": "wait4 filesystem block counters; byte totals unavailable",
               "stdout": stdout.name, "stderr": stderr.name}
     write_json(area / (label + ".json"), result)
+    if timed_out:
+        raise deadline_error(f"{label} exhausted its wall-clock reservation")
     if process.returncode:
-        raise RunError(f"{label} exited {process.returncode}" + (" (timeout)" if timed_out else ""))
+        raise RunError(f"{label} exited {process.returncode}")
     return result
 
 
@@ -689,6 +704,8 @@ def sample(run, m, task, deadline):
             raise SampleError("frozen input changed: " + name, control_failure=True)
     try:
         validate_tree(snapshot_tree(run / case["input_path"], deadline), case["members"])
+    except (TaskInterrupted, TaskTimeout):
+        raise
     except RunError as e:
         raise SampleError("frozen workload changed: " + str(e), control_failure=True) from e
     order = list(m.get("sample_roles", ["native", "baseline", "candidate", "relationships", "streams"]))
@@ -709,18 +726,25 @@ def sample(run, m, task, deadline):
     for role in order:
         try:
             run_role(run, m, task, configuration, case, area, deadline, env, result, role)
+        except (TaskInterrupted, TaskTimeout):
+            raise
         except (RunError, OSError) as e:
-            raise SampleError(str(e), control_failure=role in ("native", "baseline")) from e
+            raise SampleError(str(e), control_failure=role in m.get("control_roles", ["native", "baseline"])) from e
     if m.get("experiment", "hybrid") == "hybrid":
         candidate_order = archive_order(run, m, area / "candidate.rar", area, "candidate-order", case, deadline, env)
-        result["candidate_member_order"] = candidate_order
-        result["order"].append("native_ordered")
-        run_role(run, m, task, configuration, case, area, deadline, env, result, "native_ordered", candidate_order)
-        actual_order = archive_order(run, m, area / "native_ordered.rar", area, "native-ordered-order", case, deadline, env)
-        if actual_order != candidate_order:
-            raise RunError("native assisted-order control did not preserve the candidate member sequence; no ordering-equivalence claim")
-        result["roles"]["native_ordered"]["ordering_assisted"] = True
-        result["roles"]["native_ordered"]["verified_member_order"] = actual_order
+        try:
+            result["candidate_member_order"] = candidate_order
+            result["order"].append("native_ordered")
+            run_role(run, m, task, configuration, case, area, deadline, env, result, "native_ordered", candidate_order)
+            actual_order = archive_order(run, m, area / "native_ordered.rar", area, "native-ordered-order", case, deadline, env)
+            if actual_order != candidate_order:
+                raise RunError("native assisted-order control did not preserve the candidate member sequence; no ordering-equivalence claim")
+            result["roles"]["native_ordered"]["ordering_assisted"] = True
+            result["roles"]["native_ordered"]["verified_member_order"] = actual_order
+        except (TaskInterrupted, TaskTimeout):
+            raise
+        except (RunError, OSError) as e:
+            raise SampleError(str(e), control_failure="native_ordered" in m.get("control_roles", [])) from e
     if m.get("cold_prepare") is not None:
         result["cold_extraction"] = {role: data["cold_selective"] for role, data in result["roles"].items()}
     write_json(area / "result.json", result)
@@ -1001,14 +1025,17 @@ def parallel_screen(run, m, host, max_tasks=None):
                 with locked(run / "journal.lock"):
                     append(run, started)
                     attempted.append(task_id(task))
+                EXECUTION_CONTEXT.task_limited = deadline < phase_deadline
                 try:
                     sample(run, m, task, deadline)
                     path = run / "tasks" / task_id(task) / "result.json"
                     completed = {**started, "event": "complete", "result": str(path.relative_to(run)),
                                  "result_sha256": sha(path, deadline)}
                 except (RunError, OSError) as error:
-                    completed = {**started, "event": "failed", "error": str(error),
+                    completed = {**started, "event": "interrupted" if isinstance(error, TaskInterrupted) else "failed", "error": str(error),
                                  "control_failure": bool(getattr(error, "control_failure", False))}
+                finally:
+                    del EXECUTION_CONTEXT.task_limited
                 completed["charged_seconds"] = time.monotonic() - begin
                 completed["charge_scope"] = "diagnostic job timing; host phase accounts budget"
                 outcomes.append(completed)
@@ -1134,13 +1161,16 @@ def worker(run, host_id, max_tasks=None):
                                    "reserved_seconds": deadline - begin, "manifest_sha256": sha(run / "manifest.json")}
                         append(run, started)
                         attempted.append(task_id(task))
+                    EXECUTION_CONTEXT.task_limited = deadline < phase_deadline
                     try:
                         sample(run, m, task, deadline)
                         path = run / "tasks" / task_id(task) / "result.json"
                         completed = {**started, "event": "complete", "result": str(path.relative_to(run)), "result_sha256": sha(path, deadline)}
                     except (RunError, OSError) as e:
-                        completed = {**started, "event": "failed", "error": str(e),
+                        completed = {**started, "event": "interrupted" if isinstance(e, TaskInterrupted) else "failed", "error": str(e),
                                      "control_failure": bool(getattr(e, "control_failure", False))}
+                    finally:
+                        del EXECUTION_CONTEXT.task_limited
                     completed["charged_seconds"] = time.monotonic() - begin
                     with locked(run / "journal.lock"):
                         append(run, completed)
@@ -1199,7 +1229,7 @@ def report(run):
     m = load(run)
     rows = journal(run)
     events = list(latest(rows).values())
-    result = {"experiment": m.get("experiment", "hybrid"), "manifest_sha256": sha(run / "manifest.json"), "execution": execution_settings(m.get("execution")), "tasks": {name: sum(x["event"] == name for x in events) for name in ("started", "complete", "failed", "excluded")},
+    result = {"experiment": m.get("experiment", "hybrid"), "manifest_sha256": sha(run / "manifest.json"), "execution": execution_settings(m.get("execution")), "tasks": {name: sum(x["event"] == name for x in events) for name in ("started", "complete", "failed", "interrupted", "excluded")},
               "budget_seconds": {phase: {h["id"]: {"charged": consumed(rows, phase, h["id"]), "remaining": available(m, rows, phase, h["id"])} for h in m["hosts"]} for phase in BUDGETS},
               "selection": read_json(run / "selection.json") if m.get("experiment") != "smoke" and (run / "selection.json").exists() else None,
               "predeclared_invalid_combinations": m.get("invalid_combinations", []),

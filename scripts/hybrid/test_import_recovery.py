@@ -65,17 +65,17 @@ class ImportRecoveryTests(unittest.TestCase):
         self.freeze()
         other = self.root / "worker"
         shutil.copytree(self.run, other)
-        original = runner.sample
-        def snapshot(run, manifest, task, deadline):
-            area = run / "tasks" / runner.task_id(task)
-            area.mkdir(parents=True, exist_ok=True)
+        original = runner.run_role
+        def snapshot(*args):
+            run, manifest, task, configuration, case, area = args[:6]
             artifact = area / "progress.stdout"
             artifact.write_text("partial")
             runner.import_results(self.run, run)
             artifact.write_text("finished")
-            return original(run, manifest, task, deadline)
-        with mock.patch.object(runner, "sample", side_effect=snapshot):
+            return original(*args)
+        with mock.patch.object(runner, "run_role", side_effect=snapshot):
             runner.worker(other, "local", 1)
         self.assertEqual(runner.import_results(self.run, other)["imported_tasks"], 1)
         row = next(iter(runner.latest(runner.journal(self.run)).values()))
+        self.assertEqual(row["event"], "complete")
         self.assertEqual((self.run / "tasks" / row["task_id"] / "progress.stdout").read_text(), "finished")
