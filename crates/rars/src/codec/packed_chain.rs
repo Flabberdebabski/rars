@@ -26,7 +26,7 @@ fn encoded_length(delta: u32) -> usize {
 
 fn encode(output: &mut [u8], delta: u32) {
     let last = output.len() / 2 - 1;
-    for (index, bytes) in output.chunks_exact_mut(2).enumerate() {
+    for (index, bytes) in output.as_chunks_mut::<2>().0.iter_mut().enumerate() {
         let mut unit = ((delta >> (index * 15)) & 0x7FFF) as u16;
         if index != last {
             unit |= 0x8000;

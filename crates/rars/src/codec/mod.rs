@@ -7,7 +7,7 @@ pub(crate) mod filters;
 mod huffman;
 #[cfg(any(test, feature = "write"))]
 mod match_finder;
-#[cfg(feature = "experimental-ring-state")]
+#[cfg(feature = "write")]
 mod packed_chain;
 mod ppmd;
 pub mod rar13;

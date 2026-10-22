@@ -197,7 +197,6 @@ fn prepared_pricing_preserves_all_paths_and_remembered_state() {
 }
 
 #[test]
-#[cfg(feature = "experimental-ring-state")]
 fn ring_state_preserves_full_backtrace_endpoint_and_three_pricing_passes() {
     let span = 3 * OPTIMAL_STATE_RING_SIZE + 257;
     let mut random = 0xA17E_3B29u32;
@@ -293,7 +292,6 @@ fn ring_state_preserves_full_backtrace_endpoint_and_three_pricing_passes() {
 }
 
 #[test]
-#[cfg(feature = "experimental-ring-state")]
 fn ring_state_allocation_refusal_and_cancellation_release_every_owner() {
     use crate::codec::workspace::RefusingBudget;
     let data = vec![0; 2 * OPTIMAL_STATE_RING_SIZE + 128];
