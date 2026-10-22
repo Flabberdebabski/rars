@@ -293,19 +293,7 @@ mod tests {
 
     #[test]
     fn reverse_delta_codes_cover_all_width_boundaries() {
-        let values = [
-            0,
-            1,
-            127,
-            128,
-            16_383,
-            16_384,
-            2_097_151,
-            2_097_152,
-            268_435_455,
-            268_435_456,
-            u32::MAX,
-        ];
+        let values = [0, 1, 32_767, 32_768, 1_073_741_823, 1_073_741_824, u32::MAX];
         let mut bytes = Vec::new();
         for &value in &values {
             let start = bytes.len();

@@ -12,25 +12,10 @@ type Rar50MatchFinder<B = Allowance> = match_finder::MatchFinder<4, B>;
 
 type Rar50TreeMatchFinder<B> = match_finder::TreeMatchFinder<B>;
 
-/// The opt-in exact encoder keeps ordinary full-width fallback finders;
-/// eligible large captured jobs use the packed index.
-fn new_match_finder<B: Budget>(window: usize, allowance: &B) -> Result<Rar50MatchFinder<B>> {
-    match_finder::MatchFinder::with_allowance(window, allowance)
-}
-
-#[inline]
-fn insert_match_finder<B: Budget>(
-    finder: &mut Rar50MatchFinder<B>,
-    input: &[u8],
-    pos: usize,
-) -> Result<()> {
-    finder.insert(input, pos);
-    Ok(())
-}
-
 #[cfg(test)]
 fn test_match_finder(window: usize) -> Rar50MatchFinder {
-    new_match_finder(window, &Allowance::default()).expect("unlimited finder allocation")
+    Rar50MatchFinder::with_allowance(window, &Allowance::default())
+        .expect("unlimited finder allocation")
 }
 
 const MAX_ENCODER_MATCH_OFFSET: usize = DEFAULT_DICTIONARY_SIZE;
@@ -1222,9 +1207,10 @@ fn member_finder_with_allowance<B: Budget>(
     options: EncodeOptions,
     allowance: &B,
 ) -> Result<Rar50MatchFinder<B>> {
-    let mut finder = new_match_finder(finder_window(options, combined.len()), allowance)?;
+    let mut finder =
+        Rar50MatchFinder::with_allowance(finder_window(options, combined.len()), allowance)?;
     for pos in 0..start {
-        insert_match_finder(&mut finder, combined, pos)?;
+        finder.insert(combined, pos);
     }
     Ok(finder)
 }
@@ -1241,9 +1227,10 @@ fn seeded_finder<B: Budget>(
     // so the first blocks of a member do not clear a window the data is not yet
     // long enough to fill.
     let behind = block.start.min(options.max_match_distance);
-    let mut finder = new_match_finder(behind + (block.end - block.start), allowance)?;
+    let mut finder =
+        Rar50MatchFinder::with_allowance(behind + (block.end - block.start), allowance)?;
     for pos in block.start - behind..block.start {
-        insert_match_finder(&mut finder, combined, pos)?;
+        finder.insert(combined, pos);
     }
     Ok(finder)
 }
@@ -1531,7 +1518,7 @@ impl<B: Budget> OptimalCollector<B> {
                         match_finder::NO_POSITION
                     };
                     #[cfg(not(feature = "experimental-ring-state"))]
-                    insert_match_finder(finder, combined, pos)?;
+                    finder.insert(combined, pos);
                     let max_length = (block.end - pos).min(MAX_ENCODER_MATCH_LENGTH);
                     if !searching || max_distance == 0 || max_length < 4 {
                         continue;
@@ -2250,6 +2237,8 @@ struct OptimalWorkspace<B: Budget = Allowance> {
 }
 
 const OPTIMAL_STATE_RING_SIZE: usize = 8192;
+const _: () = assert!(OPTIMAL_STATE_RING_SIZE.is_power_of_two());
+const _: () = assert!(OPTIMAL_STATE_RING_SIZE > MAX_ENCODER_MATCH_LENGTH);
 
 impl<B: Budget> OptimalWorkspace<B> {
     fn new(allowance: &B) -> Self {
@@ -2988,7 +2977,7 @@ fn encode_tokens_with_allowance<B: Budget>(
                 tokens
                     .push(EncodeToken::Literal(combined[pos]))
                     .map_err(Into::into)?;
-                insert_match_finder(finder, combined, pos)?;
+                finder.insert(combined, pos);
                 pos += 1;
                 pending_match = cached_next;
                 continue;
@@ -3001,14 +2990,14 @@ fn encode_tokens_with_allowance<B: Budget>(
                 .map_err(Into::into)?;
             state.remember(length, distance);
             for history_pos in pos..pos + length {
-                insert_match_finder(finder, combined, history_pos)?;
+                finder.insert(combined, history_pos);
             }
             pos += length;
         } else {
             tokens
                 .push(EncodeToken::Literal(combined[pos]))
                 .map_err(Into::into)?;
-            insert_match_finder(finder, combined, pos)?;
+            finder.insert(combined, pos);
             pos += 1;
         }
         let consumed = pos - start;
@@ -3041,7 +3030,7 @@ fn lazy_match_decision<B: Budget>(
     input: &[u8],
     pos: usize,
     end: usize,
-    finder: &mut Rar50MatchFinder<B>,
+    finder: &Rar50MatchFinder<B>,
     options: EncodeOptions,
     state: &EncoderMatchState,
     distance_size: usize,
@@ -3087,7 +3076,7 @@ fn best_match<B: Budget>(
     input: &[u8],
     pos: usize,
     end: usize,
-    finder: &mut Rar50MatchFinder<B>,
+    finder: &Rar50MatchFinder<B>,
     options: EncodeOptions,
     state: &EncoderMatchState,
     distance_size: usize,

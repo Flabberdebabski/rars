@@ -1200,6 +1200,23 @@ fn parser_refusal_and_cancellation_release_finders_matches_and_parse_arrays() {
             assert_eq!(allowance.used(), 0);
         }
         if optimal {
+            // Admit the finder, then refuse later match/parse allocations.
+            // Exercise the real budget error as well as injected failures.
+            let allowance = Allowance::limited(1_200_000);
+            assert!(matches!(
+                encode_tokens_with_allowance(
+                    &data,
+                    0..data.len(),
+                    MemberSearch::Fresh,
+                    options,
+                    DISTANCE_TABLE_SIZE_50,
+                    &[],
+                    None,
+                    &allowance,
+                ),
+                Err(Error::WorkspaceLimitExceeded(details)) if details.used > 1_000_000
+            ));
+            assert_eq!(allowance.used(), 0);
             assert_each_allocation_refusal(|budget| {
                 encode_tokens_with_allowance(
                     &data,
@@ -1653,7 +1670,7 @@ fn collected_optimal_tokens(
 fn should_lazy_emit_literal(
     input: &[u8],
     pos: usize,
-    finder: &mut Rar50MatchFinder,
+    finder: &Rar50MatchFinder,
     options: EncodeOptions,
     state: &EncoderMatchState,
     distance_size: usize,
@@ -2408,7 +2425,7 @@ fn cost_aware_match_selection_prefers_repeat_distance_token() {
 
     let mut finder = test_match_finder(input.len());
     for candidate in 0..pos {
-        insert_match_finder(&mut finder, &input, candidate).unwrap();
+        finder.insert(&input, candidate);
     }
     let state = EncoderMatchState {
         reps: [30, 0, 0, 0],
@@ -2419,7 +2436,7 @@ fn cost_aware_match_selection_prefers_repeat_distance_token() {
         &input,
         pos,
         input.len(),
-        &mut finder,
+        &finder,
         EncodeOptions::default(),
         &state,
         DISTANCE_TABLE_SIZE_50,
@@ -2443,7 +2460,7 @@ fn lazy_parser_uses_match_cost_not_only_match_length() {
 
     let mut finder = test_match_finder(input.len());
     for candidate in 0..pos {
-        insert_match_finder(&mut finder, &input, candidate).unwrap();
+        finder.insert(&input, candidate);
     }
     let state = EncoderMatchState {
         reps: [30, 0, 0, 0],
@@ -2453,7 +2470,7 @@ fn lazy_parser_uses_match_cost_not_only_match_length() {
         &input,
         pos,
         input.len(),
-        &mut finder,
+        &finder,
         EncodeOptions::default(),
         &state,
         DISTANCE_TABLE_SIZE_50,
@@ -2464,7 +2481,7 @@ fn lazy_parser_uses_match_cost_not_only_match_length() {
     assert!(should_lazy_emit_literal(
         &input,
         pos,
-        &mut finder,
+        &finder,
         EncodeOptions::default().with_lazy_matching(true),
         &state,
         DISTANCE_TABLE_SIZE_50,
@@ -2484,14 +2501,14 @@ fn lazy_parser_uses_bounded_cost_lookahead() {
 
     let mut finder = test_match_finder(input.len());
     for candidate in 0..pos {
-        insert_match_finder(&mut finder, &input, candidate).unwrap();
+        finder.insert(&input, candidate);
     }
     let state = EncoderMatchState::default();
     let current = best_match(
         &input,
         pos,
         input.len(),
-        &mut finder,
+        &finder,
         EncodeOptions::default(),
         &state,
         DISTANCE_TABLE_SIZE_50,
@@ -2502,7 +2519,7 @@ fn lazy_parser_uses_bounded_cost_lookahead() {
     assert!(!should_lazy_emit_literal(
         &input,
         pos,
-        &mut finder,
+        &finder,
         EncodeOptions::default()
             .with_lazy_matching(true)
             .with_lazy_lookahead(1),
@@ -2513,7 +2530,7 @@ fn lazy_parser_uses_bounded_cost_lookahead() {
     assert!(should_lazy_emit_literal(
         &input,
         pos,
-        &mut finder,
+        &finder,
         EncodeOptions::default()
             .with_lazy_matching(true)
             .with_lazy_lookahead(2),
@@ -2535,14 +2552,14 @@ fn lazy_parser_charges_for_skipped_literals() {
 
     let mut finder = test_match_finder(input.len());
     for candidate in 0..pos {
-        insert_match_finder(&mut finder, &input, candidate).unwrap();
+        finder.insert(&input, candidate);
     }
     let state = EncoderMatchState::default();
     let current = best_match(
         &input,
         pos,
         input.len(),
-        &mut finder,
+        &finder,
         EncodeOptions::default(),
         &state,
         DISTANCE_TABLE_SIZE_50,
@@ -2553,7 +2570,7 @@ fn lazy_parser_charges_for_skipped_literals() {
         &input,
         pos + 2,
         input.len(),
-        &mut finder,
+        &finder,
         EncodeOptions::default(),
         &state,
         DISTANCE_TABLE_SIZE_50,
@@ -2565,7 +2582,7 @@ fn lazy_parser_charges_for_skipped_literals() {
     assert!(!should_lazy_emit_literal(
         &input,
         pos,
-        &mut finder,
+        &finder,
         EncodeOptions::default()
             .with_lazy_matching(true)
             .with_lazy_lookahead(2),
@@ -2580,7 +2597,7 @@ fn lazy_match_lookahead_stops_at_the_member_boundary() {
     let input = b"abcdef";
     let mut finder = test_match_finder(input.len());
     for pos in 0..4 {
-        insert_match_finder(&mut finder, input, pos).unwrap();
+        finder.insert(input, pos);
     }
     let current = MatchCandidate {
         length: 4,
@@ -2593,7 +2610,7 @@ fn lazy_match_lookahead_stops_at_the_member_boundary() {
             input,
             4,
             input.len(),
-            &mut finder,
+            &finder,
             EncodeOptions::default()
                 .with_lazy_matching(true)
                 .with_lazy_lookahead(4),
