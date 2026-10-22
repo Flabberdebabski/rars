@@ -25,8 +25,8 @@ def raw_native_names_supported(tmp_path):
 @pytest.mark.skipif(os.name != "posix", reason="native Unix byte names")
 @pytest.mark.parametrize("format", ["rar14", "rar15", "rar20", "rar29", "rar30", "rar40", "rar50", "rar70"])
 @pytest.mark.parametrize("raw_names", [False, True], ids=["unicode", "non_utf8"])
-def test_native_filename_round_trip(tmp_path, format, raw_names, raw_native_names_supported):
-    if raw_names and not raw_native_names_supported:
+def test_native_filename_round_trip(tmp_path, format, raw_names, request):
+    if raw_names and not request.getfixturevalue("raw_native_names_supported"):
         pytest.skip("filesystem rejects non-UTF-8 filenames with EILSEQ")
     root_name = b"tree-\xfe" if raw_names else "tree-\u2603".encode()
     names = (
