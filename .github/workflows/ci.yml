@@ -182,3 +182,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Test the library without workspace feature unification
         run: python3 scripts/check-unit-features.py --features '${{ matrix.features }}'
+      - name: Check encoder memory bounds without workspace feature unification
+        if: matrix.features == 'write' || matrix.features == 'write,parallel'
+        run: cargo test -p rars --locked --no-default-features --features '${{ matrix.features }}' --test encoder_memory_regression
