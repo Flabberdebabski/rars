@@ -1226,39 +1226,68 @@ def export_worker(run, host_id, output):
         raise RunError("worker is absent from explicit inventory")
     if output.exists():
         raise RunError("worker bundle destination exists")
-    with tarfile.open(output, "w:gz") as archive:
-        for name in ("manifest.json", "manifest.sha256", "journal.jsonl", "selection.json", "frozen"):
-            path = run / name
-            if path.exists():
-                archive.add(path, arcname="hybrid-run/" + name)
-        for path in (run / "tasks").glob("*/*") if (run / "tasks").exists() else []:
-            if path.is_file() and path.suffix in (".json", ".stdout", ".stderr"):
-                archive.add(path, arcname="hybrid-run/" + path.relative_to(run).as_posix())
+    # Journal entries must describe one consistent snapshot, including any
+    # outstanding phase reservations. Completed receipts are immutable.
+    with locked(run / "journal.lock"):
+        with tarfile.open(output, "w:gz") as archive:
+            for name in ("manifest.json", "manifest.sha256", "journal.jsonl", "selection.json", "frozen"):
+                path = run / name
+                if path.exists():
+                    archive.add(path, arcname="hybrid-run/" + name)
+            for path in (run / "tasks").glob("*/*") if (run / "tasks").exists() else []:
+                if path.is_file() and path.suffix in (".json", ".stdout", ".stderr"):
+                    archive.add(path, arcname="hybrid-run/" + path.relative_to(run).as_posix())
     return {"bundle": str(output), "sha256": sha(output), "host": host_id,
             "command": f"python3 hybrid-run/frozen/hybrid_candidates.py run hybrid-run --host {host_id}",
             "scope": "Only this host's deterministic tasks and fixed budget share execute; no automatic SSH"}
 
 
+def started_precedes(started, terminal):
+    return (started.get("event") == "started" and terminal.get("event") in
+            ("complete", "failed", "interrupted") and
+            all(terminal.get(key) == value for key, value in started.items() if key != "event"))
+
+
 def import_results(run, source):
-    """Merge exported worker receipts without extracting untrusted tar paths."""
+    """Merge monotonic worker progress, retaining reservations and partial copies."""
     m = load(run)
     other = load(source)
     if digest(m) != digest(other):
         raise RunError("worker results belong to a different frozen experiment")
+    source_rows = journal(source)
+    # Validate proofs before publishing any completed receipt.
+    for phase in BUDGETS:
+        verified_results(source, source_rows, phase)
     added = 0
     with locked(run / "journal.lock"):
         own = journal(run)
         known = latest(own)
-        for row in latest(journal(source)).values():
+        # Import reservations first: an interrupted import must never publish
+        # parallel tasks while dropping the budget that admitted them.
+        for row in source_rows:
+            if row.get("event") != "phase-reservation":
+                continue
+            if row.get("host") not in {h["id"] for h in m["hosts"]} or row.get("phase") not in BUDGETS:
+                raise RunError("invalid phase receipt host or phase")
+            if row.get("id"):
+                previous = next((r for r in own if r.get("id") == row["id"]), None)
+                if previous is not None and previous != row:
+                    raise RunError("conflicting phase receipt")
+            if row not in own:
+                append(run, row)
+                own.append(row)
+        for row in latest(source_rows).values():
             if row["host"] not in {h["id"] for h in m["hosts"]} or host_for(m, row["task"]) != row["host"]:
                 raise RunError("receipt has the wrong deterministic host assignment")
             expected_id = task_id(row["task"])
             if row["task_id"] != expected_id:
                 raise RunError("invalid task ID")
-            if expected_id in known:
-                if known[expected_id] != row:
+            previous = known.get(expected_id)
+            if previous is not None:
+                if previous == row or started_precedes(row, previous):
+                    continue
+                if not started_precedes(previous, row):
                     raise RunError("conflicting receipt for an existing task")
-                continue
             if row["event"] == "complete":
                 expected_path = "tasks/" + expected_id + "/result.json"
                 if row["result"] != expected_path or sha(source / expected_path) != row["result_sha256"]:
@@ -1266,18 +1295,46 @@ def import_results(run, source):
                 result = read_json(source / expected_path)
                 if result["task"] != row["task"]:
                     raise RunError("receipt task mismatch")
+            if row["event"] == "started":
+                # In-flight stdout and receipts are still mutable. Import the
+                # reservation now and copy evidence only with its terminal row.
+                append(run, row)
+                known[expected_id] = row
+                added += 1
+                continue
             src = source / "tasks" / expected_id
             dst = run / "tasks" / expected_id
-            dst.mkdir(parents=True, exist_ok=False)
-            for path in src.iterdir() if src.exists() else []:
-                if path.is_file() and not path.is_symlink() and path.suffix in (".json", ".stdout", ".stderr"):
-                    shutil.copy2(path, dst / path.name)
+            dst.mkdir(parents=True, exist_ok=True)
+            # A failed copy or a crash between publication and journal append
+            # leaves reusable files. Never overwrite conflicting evidence.
+            with tempfile.TemporaryDirectory(prefix=".import-", dir=dst.parent) as temporary:
+                for path in src.iterdir() if src.exists() else []:
+                    if path.is_file() and not path.is_symlink() and path.suffix in (".json", ".stdout", ".stderr"):
+                        target = dst / path.name
+                        if target.exists():
+                            if sha(target) != sha(path):
+                                raise RunError("conflicting imported task artifact")
+                            continue
+                        staged = Path(temporary) / path.name
+                        shutil.copy2(path, staged)
+                        staged.replace(target)
             append(run, row)
             known[expected_id] = row
             added += 1
-        for row in journal(source):
-            if row.get("event") in ("phase-done", "phase-accounting") and row not in own:
+        # Only close reservations and announce phase completion after all task
+        # receipts are durable; a partial import remains conservatively charged.
+        for row in source_rows:
+            if row.get("event") not in ("phase-accounting", "phase-done"):
+                continue
+            if row.get("host") not in {h["id"] for h in m["hosts"]} or row.get("phase") not in BUDGETS:
+                raise RunError("invalid phase receipt host or phase")
+            if row.get("id"):
+                previous = next((r for r in own if r.get("id") == row["id"]), None)
+                if previous is not None and previous != row:
+                    raise RunError("conflicting phase receipt")
+            if row not in own:
                 append(run, row)
+                own.append(row)
     return {"imported_tasks": added}
 
 

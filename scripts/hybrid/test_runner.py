@@ -347,7 +347,7 @@ class RunnerTests(unittest.TestCase):
         shutil.copytree(self.run, third)
         (third / "journal.jsonl").write_text("")
         shutil.rmtree(third / "tasks")
-        with self.assertRaisesRegex(runner.RunError, "path/hash"):
+        with self.assertRaisesRegex(runner.RunError, "completed task receipt changed"):
             runner.import_results(third, other)
 
     def test_control_failure_stops_the_run(self):
