@@ -11,6 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 import contextlib
 import fcntl
 import hashlib
+import io
 import json
 import math
 import os
@@ -1226,16 +1227,24 @@ def export_worker(run, host_id, output):
         raise RunError("worker is absent from explicit inventory")
     if output.exists():
         raise RunError("worker bundle destination exists")
-    # Journal entries must describe one consistent snapshot, including any
-    # outstanding phase reservations. Completed receipts are immutable.
+    # Snapshot mutable metadata under the lock, then release it before gzip
+    # touches the potentially large corpus. Terminal artifacts are immutable.
     with locked(run / "journal.lock"):
-        with tarfile.open(output, "w:gz") as archive:
-            for name in ("manifest.json", "manifest.sha256", "journal.jsonl", "selection.json", "frozen"):
-                path = run / name
-                if path.exists():
-                    archive.add(path, arcname="hybrid-run/" + name)
-            for path in (run / "tasks").glob("*/*") if (run / "tasks").exists() else []:
-                if path.is_file() and path.suffix in (".json", ".stdout", ".stderr"):
+        snapshots = {name: (run / name).read_bytes() for name in
+                     ("journal.jsonl", "selection.json") if (run / name).exists()}
+        terminal_ids = [identifier for identifier, row in latest(journal(run)).items()
+                        if row["event"] in ("complete", "failed", "interrupted")]
+    with tarfile.open(output, "w:gz") as archive:
+        for name in ("manifest.json", "manifest.sha256", "frozen"):
+            archive.add(run / name, arcname="hybrid-run/" + name)
+        for name, data in snapshots.items():
+            info = tarfile.TarInfo("hybrid-run/" + name)
+            info.size = len(data)
+            archive.addfile(info, io.BytesIO(data))
+        for identifier in terminal_ids:
+            area = run / "tasks" / identifier
+            for path in area.iterdir() if area.exists() else []:
+                if path.is_file() and not path.is_symlink() and path.suffix in (".json", ".stdout", ".stderr"):
                     archive.add(path, arcname="hybrid-run/" + path.relative_to(run).as_posix())
     return {"bundle": str(output), "sha256": sha(output), "host": host_id,
             "command": f"python3 hybrid-run/frozen/hybrid_candidates.py run hybrid-run --host {host_id}",
@@ -1335,13 +1344,24 @@ def import_results(run, source):
             if row not in own:
                 append(run, row)
                 own.append(row)
+        selection_path = source / "selection.json"
+        if selection_path.exists():
+            selection = read_json(selection_path)
+            if selection.get("manifest_sha256") != sha(run / "manifest.json"):
+                raise RunError("selection belongs to a different immutable run")
+            destination = run / "selection.json"
+            if destination.exists():
+                if read_json(destination) != selection:
+                    raise RunError("conflicting frozen selection")
+            else:
+                write_json(destination, selection)
     return {"imported_tasks": added}
 
 
 def ssh_argv(host, command):
     """Only the explicitly inventoried destination; never a local shell."""
     inventory([host])
-    return ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=20", "-p", str(host.get("port", 22)),
+    return ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=20", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3", "-p", str(host.get("port", 22)),
             "--", host["ssh_target"], command]
 
 
@@ -1372,40 +1392,51 @@ def unpack_bundle(bundle, destination):
 
 
 def dispatch_ssh(run, host):
-    m = load(run)
-    # Repeating a failed transport uses the same remote state, so already
-    # completed remote work is resumed/imported rather than silently discarded.
-    token = sha(run / "manifest.json")[:16] + "-" + sha(run / "journal.jsonl")[:16]
+    load(run)
+    # The remote state belongs to the immutable run, not a moving controller
+    # journal. Each transport attempt gets fresh input and output snapshots.
+    token = sha(run / "manifest.json")[:16]
     remote = host["remote_directory"].rstrip("/") + "/" + token
-    local = run / "transport" / host["id"] / token
-    local.mkdir(parents=True, exist_ok=True)
+    attempt = "attempt-" + uuid.uuid4().hex
+    remote_attempt = remote + "/" + attempt
+    local = run / "transport" / host["id"] / token / attempt
+    local.mkdir(parents=True)
     bundle = local / "worker.tar.gz"
-    if not bundle.exists():
-        export_worker(run, host["id"], bundle)
-    checked_command(ssh_argv(host, "mkdir -p " + shlex.quote(remote)))
+    export_worker(run, host["id"], bundle)
+    checked_command(ssh_argv(host, "mkdir -p " + shlex.quote(remote_attempt)))
     scp = ["scp", "-q", "-o", "BatchMode=yes", "-o", "ConnectTimeout=20", "-P", str(host.get("port", 22)), "--"]
-    checked_command([*scp, str(bundle), host["ssh_target"] + ":" + remote + "/worker.tar.gz"])
+    checked_command([*scp, str(bundle), host["ssh_target"] + ":" + remote_attempt + "/worker.tar.gz"])
     worker = remote + "/hybrid-run/frozen/hybrid_candidates.py"
     state = remote + "/hybrid-run"
-    command = ("test -f " + shlex.quote(state + "/manifest.json") + " || tar -xzf " +
-               shlex.quote(remote + "/worker.tar.gz") + " -C " + shlex.quote(remote))
+    incoming = remote_attempt + "/hybrid-run"
+    checked_command(ssh_argv(host, "tar -xzf " + shlex.quote(remote_attempt + "/worker.tar.gz") +
+                            " -C " + shlex.quote(remote_attempt)))
+    synchronize = shlex.join(["python3", worker, "import-results", state, "--from-directory", incoming])
+    command = ("if test -f " + shlex.quote(state + "/manifest.json") + "; then " + synchronize +
+               "; elif test -e " + shlex.quote(state) + "; then exit 1; else mv " +
+               shlex.quote(incoming) + " " + shlex.quote(state) + "; fi")
     checked_command(ssh_argv(host, command))
-    # Export even after a worker error, retaining typed failure receipts.
     run_command = shlex.join(["python3", worker, "run", state, "--host", host["id"]])
-    export_command = shlex.join(["python3", worker, "export-worker", state, "--host", host["id"], "--output", remote + "/results.tar.gz"])
+    export_command = shlex.join(["python3", worker, "export-worker", state, "--host", host["id"],
+                                 "--output", remote_attempt + "/results.tar.gz"])
     completed = subprocess.run(ssh_argv(host, run_command), stdin=subprocess.DEVNULL, capture_output=True, text=True)
-    checked_command(ssh_argv(host, "test -f " + shlex.quote(remote + "/results.tar.gz") + " || " + export_command))
-    checked_command([*scp, host["ssh_target"] + ":" + remote + "/results.tar.gz", str(local / "results.tar.gz")])
+    # Always export the latest receipts, even after a worker error. Never reuse
+    # a stale result archive or a directory from an interrupted unpack.
+    checked_command(ssh_argv(host, export_command))
+    checked_command([*scp, host["ssh_target"] + ":" + remote_attempt + "/results.tar.gz", str(local / "results.tar.gz")])
     returned = local / "returned"
-    if not returned.exists():
-        returned.mkdir()
-        unpack_bundle(local / "results.tar.gz", returned)
+    returned.mkdir()
+    unpack_bundle(local / "results.tar.gz", returned)
     imported = import_results(run, returned / "hybrid-run")
-    output = completed.stdout
     write_json(local / "transport.json", {"manifest_sha256": sha(run / "manifest.json"),
-               "host": host, "remote": remote, "worker_stdout": output, **imported})
+               "host": host, "remote": remote, "worker_stdout": completed.stdout, **imported})
     if completed.returncode:
         raise RunError("SSH worker failed; returned receipts retained and imported: " + completed.stderr[-1000:])
+    # The stable worker and imported receipts retain all durable evidence.
+    checked_command(ssh_argv(host, "rm -rf -- " + shlex.quote(remote_attempt)))
+    shutil.rmtree(returned)
+    bundle.unlink()
+    (local / "results.tar.gz").unlink()
     return imported
 
 
