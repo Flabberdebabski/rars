@@ -1,5 +1,7 @@
 # Exact encoder: portable frozen comparison
 
+Fresh clean-source measurements and validation status are in [RESULTS.md](RESULTS.md).
+
 This package reproduces the original seven-input, three-control standalone experiment. It is self-contained standard-library Python; native RAR is supplied separately and no proprietary binary is included. POSIX permissions/mtime verification requires a POSIX host. This is a local serial protocol, not a broad/native-RAR parity claim.
 
 `vendor/worker.py` is the unchanged mechanical worker, SHA256 `866235a79a0b6e0bde6873efcb17613219a4736c5e74913c26b1611bd880771d`. Its CPU accounting, deterministic role order, task IDs, one warmup, 15 measured pairs, settings and verification are unchanged. `analysis.py` retains the original 5,000-resample paired-median bootstrap functions. Only the path/orchestration layer is portable. `native_smoke.py` retains the twelve-case settings and extraction assertions; any unexpected refusal fails.
