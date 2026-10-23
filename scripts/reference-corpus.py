@@ -177,7 +177,13 @@ def archive_volumes(directory, stem):
                                                  stem + ".part01.rar", stem + ".part001.rar")]
     if len(first) != 1:
         raise RuntimeError("cannot find the first volume of %s in %s" % (stem, names))
-    return first[0], names
+    return first[0], volume_order(first[0], names)
+
+
+def volume_order(first, names):
+    """Volumes in set order. By name, old-style .r00 and .r01 sort before
+    their .rar, which comes first in the set."""
+    return [first] + sorted(name for name in names if name != first)
 
 
 def pack(packer, command, case, payload_dir, out_dir):
@@ -288,7 +294,7 @@ def compare_one(corpus, archive, variant, expected, unrar, rars, rars_options, t
         volumes.mkdir()
         source = corpus / "archives" / archive["directory"]
         paths = []
-        for volume in archive["volumes"]:
+        for volume in volume_order(archive["first"], archive["volumes"]):
             shutil.copyfile(source / volume, volumes / volume)
             paths.append(volumes / volume)
         if change is not None:
